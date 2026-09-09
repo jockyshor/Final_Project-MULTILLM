@@ -2,7 +2,6 @@ import express from 'express';
 import type { Request, Response } from 'express';
 import cors from 'cors';
 import * as dotenv from 'dotenv';
-import { Readable } from 'node:stream'; // 👈 1. Native Stream Bridge import
 import { streamText } from 'ai';
 import { createGroq } from '@ai-sdk/groq';
 import { google } from '@ai-sdk/google';
@@ -24,10 +23,10 @@ const groq = createGroq({
 
 const gemini = google;
 
-// 2. VERIFIED LIVE MODEL REGISTRY
+// VERIFIED LIVE MODEL REGISTRY
 const MODELS = {
-  GROQ_FAST: 'openai/gpt-oss-20b',          // 👈 Fast 20B Specialist
-  GROQ_REASONING: 'openai/gpt-oss-120b',     // 👈 Heavy 120B Code/Reasoning Specialist
+  GROQ_FAST: 'openai/gpt-oss-20b',          // Fast 20B Specialist
+  GROQ_REASONING: 'openai/gpt-oss-120b',     // Heavy 120B Code/Reasoning Specialist
   GEMINI_VISION: 'gemini-1.5-flash',
 } as const;
 
@@ -48,8 +47,8 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     const query = (messages[messages.length - 1]?.content || "").toLowerCase();
 
     // Specialist Selection Logic
-    let selectedModel;
-    let systemPrompt;
+    let selectedModel: any;
+    let systemPrompt: string;
     let routingReason: string;
 
     if (query.includes('code') || query.includes('typescript')) {
@@ -68,8 +67,9 @@ app.post('/api/chat', async (req: Request, res: Response) => {
 
     console.log(`📡 [Router] Routing to: ${selectedModel.modelId} | Reason: ${routingReason}`);
 
-    // 5. INITIATE STREAM
-// 5. INITIATE STREAM
+    // 5. INITIATE STREAM & TELEMETRY
+    const startTime = Date.now();
+
     const result = streamText({
       model: selectedModel,
       system: systemPrompt,
@@ -77,29 +77,52 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     });
 
     // 6. DIRECT PROTOCOL STREAM BRIDGE
-    // Set headers required by @ai-sdk/react useChat
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('x-vercel-ai-data-stream', 'v1');
 
-    // Stream text chunks directly into the HTTP response
+    // Stream text chunks to UI
     for await (const chunk of result.textStream) {
       res.write(`0:${JSON.stringify(chunk)}\n`);
     }
 
-    // Stream completed cleanly
+    // Capture token usage safely
+    const usage = await result.usage;
+    const latencyMs = Date.now() - startTime;
+
+    const inputTokens = (usage as any).inputTokens ?? (usage as any).promptTokens ?? 0;
+    const outputTokens = (usage as any).outputTokens ?? (usage as any).completionTokens ?? 0;
+    const totalTokens = (usage as any).totalTokens ?? (inputTokens + outputTokens);
+
+    console.log(`📊 [Telemetry] Model: ${selectedModel.modelId} | Total Tokens: ${totalTokens} | Latency: ${latencyMs}ms`);
+
+    // Emit metadata annotation frame to React client
+    const metadata = {
+      model: selectedModel.modelId,
+      routingReason,
+      latencyMs,
+      usage: {
+        promptTokens: inputTokens,
+        completionTokens: outputTokens,
+        totalTokens: totalTokens,
+      },
+    };
+
+    res.write(`2:[${JSON.stringify(metadata)}]\n`);
+
+    // Cleanly close the HTTP response
     res.end();
 
-    } catch (error) {
-        console.error('CRITICAL ROUTE ERROR:', error);
-        if (!res.headersSent) {
-        res.status(500).json({ error: 'Orchestration layer failure.' });
-        } else {
-        res.end();
-        }
+  } catch (error) {
+    console.error('CRITICAL ROUTE ERROR:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Orchestration layer failure.' });
+    } else {
+      res.end();
     }
-}); 
+  }
+});
+
 // 7. START SERVER
 app.listen(PORT, () => {
   console.log(`🚀 MULTILLM 2026 Core active on port ${PORT}`);
 });
-
