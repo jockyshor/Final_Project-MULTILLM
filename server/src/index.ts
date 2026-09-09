@@ -2,7 +2,7 @@ import express from 'express';
 import type { Request, Response } from 'express';
 import cors from 'cors';
 import * as dotenv from 'dotenv';
-import { streamText } from 'ai';
+import { streamText, generateText } from 'ai';
 import { createGroq } from '@ai-sdk/groq';
 import { google } from '@ai-sdk/google';
 
@@ -40,66 +40,87 @@ app.use((req, res, next) => {
   next();
 });
 
-// 4. THE AI ROUTER
+
+// 4. THE SEMANTIC AI ROUTER
 app.post('/api/chat', async (req: Request, res: Response) => {
   try {
     const { messages } = req.body;
-    const query = (messages[messages.length - 1]?.content || "").toLowerCase();
+    const lastUserMessage = messages[messages.length - 1]?.content || "";
 
-    // Specialist Selection Logic
+    // ⏱️ Step A: Fast Semantic Intent Classification (~60-100ms via Groq)
+    const classificationStart = Date.now();
+
+    const { text: intentResponse } = await generateText({
+      model: groq(MODELS.GROQ_FAST),
+      system: `You are an intent classification router. 
+Analyze the user's latest message in context and classify its primary intent into exactly ONE category:
+- CODE: For programming, software design, debugging, algorithms, technical implementation, or code refactoring.
+- VISION: For images, diagrams, visual patterns, OCR, or UI mockups.
+- GENERAL: For casual conversation, creative writing, summaries, general knowledge, or simple explanations.
+
+Respond with ONLY the category word: CODE, VISION, or GENERAL. Do not explain.`,
+      prompt: `Latest message: "${lastUserMessage}"\nClassification:`,
+      temperature: 0, // Deterministic
+    });
+
+    const detectedIntent = intentResponse.trim().toUpperCase();
+    const classificationLatency = Date.now() - classificationStart;
+
+    console.log(`🧠 [Semantic Classifier] Intent: ${detectedIntent} (${classificationLatency}ms)`);
+
+    // 🎯 Step B: Dynamic Specialist Assignment
     let selectedModel: any;
     let systemPrompt: string;
     let routingReason: string;
 
-    if (query.includes('code') || query.includes('typescript')) {
+    if (detectedIntent.includes('CODE')) {
       selectedModel = groq(MODELS.GROQ_REASONING);
-      systemPrompt = "You are a Senior Software Architect. Provide clean, secure, and modern code.";
-      routingReason = "Code/Architecture Intent detected (120B Specialist)";
-    } else if (query.includes('image') || query.includes('visual')) {
+      systemPrompt = "You are a Senior Software Architect. Provide robust, clean, and modern code solutions.";
+      routingReason = `Semantic Classifier detected CODE intent (${classificationLatency}ms)`;
+    } else if (detectedIntent.includes('VISION')) {
       selectedModel = gemini(MODELS.GEMINI_VISION);
-      systemPrompt = "You are a Multimodal Expert. Analyze images and visual patterns.";
-      routingReason = "Multimodal Intent detected (Gemini Vision)";
+      systemPrompt = "You are a Multimodal Expert. Analyze visual structures and patterns.";
+      routingReason = `Semantic Classifier detected VISION intent (${classificationLatency}ms)`;
     } else {
       selectedModel = groq(MODELS.GROQ_FAST);
-      systemPrompt = "You are a concise AI assistant optimized for speed.";
-      routingReason = "General query (Fast 20B Specialist)";
+      systemPrompt = "You are a helpful, fast, and concise general AI assistant.";
+      routingReason = `Semantic Classifier detected GENERAL intent (${classificationLatency}ms)`;
     }
 
-    console.log(`📡 [Router] Routing to: ${selectedModel.modelId} | Reason: ${routingReason}`);
+    console.log(`📡 [Router] Delegating to: ${selectedModel.modelId}`);
 
-    // 5. INITIATE STREAM & TELEMETRY
-    const startTime = Date.now();
+    // 🚀 Step C: Stream with Full Conversation Continuity
+    const streamStart = Date.now();
 
     const result = streamText({
       model: selectedModel,
       system: systemPrompt,
-      messages,
+      messages, // Passes the entire conversation history to whichever specialist was chosen!
     });
 
     // 6. DIRECT PROTOCOL STREAM BRIDGE
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('x-vercel-ai-data-stream', 'v1');
 
-    // Stream text chunks to UI
     for await (const chunk of result.textStream) {
       res.write(`0:${JSON.stringify(chunk)}\n`);
     }
 
-    // Capture token usage safely
+    // Capture Token Telemetry
     const usage = await result.usage;
-    const latencyMs = Date.now() - startTime;
+    const streamLatency = Date.now() - streamStart;
+    const totalLatency = classificationLatency + streamLatency;
 
     const inputTokens = (usage as any).inputTokens ?? (usage as any).promptTokens ?? 0;
     const outputTokens = (usage as any).outputTokens ?? (usage as any).completionTokens ?? 0;
     const totalTokens = (usage as any).totalTokens ?? (inputTokens + outputTokens);
 
-    console.log(`📊 [Telemetry] Model: ${selectedModel.modelId} | Total Tokens: ${totalTokens} | Latency: ${latencyMs}ms`);
+    console.log(`📊 [Telemetry] Model: ${selectedModel.modelId} | Tokens: ${totalTokens} | Total Latency: ${totalLatency}ms`);
 
-    // Emit metadata annotation frame to React client
     const metadata = {
       model: selectedModel.modelId,
       routingReason,
-      latencyMs,
+      latencyMs: totalLatency,
       usage: {
         promptTokens: inputTokens,
         completionTokens: outputTokens,
@@ -108,8 +129,6 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     };
 
     res.write(`2:[${JSON.stringify(metadata)}]\n`);
-
-    // Cleanly close the HTTP response
     res.end();
 
   } catch (error) {
@@ -121,7 +140,6 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     }
   }
 });
-
 // 7. START SERVER
 app.listen(PORT, () => {
   console.log(`🚀 MULTILLM 2026 Core active on port ${PORT}`);
