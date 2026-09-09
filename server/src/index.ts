@@ -2,6 +2,7 @@ import express from 'express';
 import type { Request, Response } from 'express';
 import cors from 'cors';
 import * as dotenv from 'dotenv';
+import { Readable } from 'node:stream'; // 👈 1. Native Stream Bridge import
 import { streamText } from 'ai';
 import { createGroq } from '@ai-sdk/groq';
 import { google } from '@ai-sdk/google';
@@ -11,17 +12,24 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5001;
 
-// 2. DEFENSIVE PROVIDER INITIALIZATION (August 2026 Strict Mode)
+// 2. DEFENSIVE PROVIDER INITIALIZATION
 const groqKey = process.env.GROQ_API_KEY;
 if (!groqKey) {
   throw new Error("Missing GROQ_API_KEY in server/.env");
 }
 
 const groq = createGroq({
-  apiKey: groqKey, // Narrowed to 'string' for TS 7.0
+  apiKey: groqKey,
 });
 
-const gemini = google; // Standard Google provider
+const gemini = google;
+
+// 2. VERIFIED LIVE MODEL REGISTRY
+const MODELS = {
+  GROQ_FAST: 'openai/gpt-oss-20b',          // 👈 Fast 20B Specialist
+  GROQ_REASONING: 'openai/gpt-oss-120b',     // 👈 Heavy 120B Code/Reasoning Specialist
+  GEMINI_VISION: 'gemini-1.5-flash',
+} as const;
 
 // 3. MIDDLEWARE
 app.use(cors({ origin: 'http://localhost:5173' }));
@@ -42,68 +50,56 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     // Specialist Selection Logic
     let selectedModel;
     let systemPrompt;
+    let routingReason: string;
 
     if (query.includes('code') || query.includes('typescript')) {
-      selectedModel = groq('llama-3.3-70b-versatile');
+      selectedModel = groq(MODELS.GROQ_REASONING);
       systemPrompt = "You are a Senior Software Architect. Provide clean, secure, and modern code.";
+      routingReason = "Code/Architecture Intent detected (120B Specialist)";
     } else if (query.includes('image') || query.includes('visual')) {
-      selectedModel = gemini('gemini-1.5-flash');
+      selectedModel = gemini(MODELS.GEMINI_VISION);
       systemPrompt = "You are a Multimodal Expert. Analyze images and visual patterns.";
+      routingReason = "Multimodal Intent detected (Gemini Vision)";
     } else {
-      selectedModel = groq('llama-3.3-8b-instant');
+      selectedModel = groq(MODELS.GROQ_FAST);
       systemPrompt = "You are a concise AI assistant optimized for speed.";
+      routingReason = "General query (Fast 20B Specialist)";
     }
 
-    console.log(`📡 [2026 Router] Routing to: ${selectedModel.modelId}`);
+    console.log(`📡 [Router] Routing to: ${selectedModel.modelId} | Reason: ${routingReason}`);
 
     // 5. INITIATE STREAM
-    const result = await streamText({
+// 5. INITIATE STREAM
+    const result = streamText({
       model: selectedModel,
       system: systemPrompt,
       messages,
     });
 
-    /**
-     * SENIOR 2026 STREAM BRIDGE
-     * We attempt the standard pipe helper first. 
-     * If TS 7.0 complains about the type, we use (as any) because 
-     * the runtime object in v7.0.93 still contains the protocol methods.
-     */
-    try {
-      // Set the protocol headers required by React 'useChat'
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      res.setHeader('x-vercel-ai-data-stream', 'v1');
+    // 6. DIRECT PROTOCOL STREAM BRIDGE
+    // Set headers required by @ai-sdk/react useChat
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('x-vercel-ai-data-stream', 'v1');
 
-      // Attempt the direct pipe
-      (result as any).pipeDataStreamToResponse(res);
-      
-    } catch (streamError) {
-      console.warn("Standard pipe failed, using manual Web Stream reader...");
-      
-      // Fallback: Manual ReadableStream -> Express Writable
-      const reader = (result as any).fullStream?.getReader();
-      if (!reader) throw new Error("No streamable content found on result.");
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        // Convert protocol objects to strings if necessary
-        const chunk = typeof value === 'string' ? value : JSON.stringify(value) + '\n';
-        res.write(chunk);
-      }
-      res.end();
+    // Stream text chunks directly into the HTTP response
+    for await (const chunk of result.textStream) {
+      res.write(`0:${JSON.stringify(chunk)}\n`);
     }
 
-  } catch (error) {
-    console.error('CRITICAL ROUTE ERROR:', error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Orchestration layer failure.' });
-    }
-  }
-});
+    // Stream completed cleanly
+    res.end();
 
+    } catch (error) {
+        console.error('CRITICAL ROUTE ERROR:', error);
+        if (!res.headersSent) {
+        res.status(500).json({ error: 'Orchestration layer failure.' });
+        } else {
+        res.end();
+        }
+    }
+}); 
+// 7. START SERVER
 app.listen(PORT, () => {
   console.log(`🚀 MULTILLM 2026 Core active on port ${PORT}`);
 });
-
 
