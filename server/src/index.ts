@@ -8,6 +8,7 @@ import { google } from '@ai-sdk/google';
 import { eq, desc } from 'drizzle-orm';
 import { db } from './db/index.js';
 import { conversations, messages as messagesTable } from './db/schema.js';
+import { projectTools } from './mcp/tools.js';
 
 // 1. CONFIGURATION
 dotenv.config();
@@ -25,8 +26,8 @@ const gemini = google;
 
 // VERIFIED LIVE MODEL REGISTRY
 const MODELS = {
-  GROQ_FAST: 'openai/gpt-oss-20b',          // Fast 20B Specialist & Router
-  GROQ_REASONING: 'openai/gpt-oss-120b',     // Heavy 120B Code/Reasoning Specialist
+  GROQ_FAST: 'openai/gpt-oss-20b',
+  GROQ_REASONING: 'openai/gpt-oss-120b',
   GEMINI_VISION: 'gemini-1.5-flash',
 } as const;
 
@@ -34,15 +35,12 @@ const MODELS = {
 app.use(cors({ origin: 'http://localhost:5173' }));
 app.use(express.json());
 
-// Observability Logger
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
   next();
 });
 
 // 4. REST ENDPOINTS FOR HISTORY HYDRATION
-
-// GET /api/conversations - List all recent conversations
 app.get('/api/conversations', async (req: Request, res: Response) => {
   try {
     const list = await db
@@ -57,12 +55,9 @@ app.get('/api/conversations', async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/conversations/:id - Load full message history of a conversation
 app.get('/api/conversations/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-
-    // Strict type narrowing for Express params
     if (!id || typeof id !== 'string') {
       res.status(400).json({ error: 'Valid conversation ID is required' });
       return;
@@ -81,7 +76,7 @@ app.get('/api/conversations/:id', async (req: Request, res: Response) => {
   }
 });
 
-// 5. THE AI ROUTER WITH PERSISTENCE & CONCISE SYSTEM PROMPTS
+// 5. THE AI ROUTER WITH RE-ACT AGENT TOOL CALLING
 app.post('/api/chat', async (req: Request, res: Response) => {
   try {
     const { messages, conversationId: clientConversationId } = req.body;
@@ -119,9 +114,9 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       model: groq(MODELS.GROQ_FAST),
       system: `You are an intent classification router. 
 Analyze the user's latest message in context and classify its primary intent into exactly ONE category:
-- CODE: For programming, software design, debugging, algorithms, technical implementation, or code refactoring.
+- CODE: For programming, software design, debugging, repository questions, file inspection, or technical tasks.
 - VISION: For images, diagrams, visual patterns, OCR, or UI mockups.
-- GENERAL: For casual conversation, creative writing, summaries, general knowledge, or simple explanations.
+- GENERAL: For casual conversation, creative writing, summaries, or general knowledge.
 
 Respond with ONLY the category word: CODE, VISION, or GENERAL. Do not explain.`,
       prompt: `Latest message: "${lastUserMessage}"\nClassification:`,
@@ -131,40 +126,94 @@ Respond with ONLY the category word: CODE, VISION, or GENERAL. Do not explain.`,
     const detectedIntent = intentResponse.trim().toUpperCase();
     const classificationLatency = Date.now() - classificationStart;
 
-    // Step D: Specialist Assignment with Ultra-Concise Rules
+    // Step D: Specialist Assignment
     let selectedModel: any;
-    let systemPrompt: string;
     let routingReason: string;
+    const isCodeSpecialist = detectedIntent.includes('CODE');
 
-    if (detectedIntent.includes('CODE')) {
+    if (isCodeSpecialist) {
       selectedModel = groq(MODELS.GROQ_REASONING);
-      // Ultra-concise code prompt: No filler, no conversational preambles
-      systemPrompt = "You are an expert Software Architect. Return ONLY the clean code with a maximum of 1-2 sentences of explanation. Absolutely NO conversational preambles, no filler, and no verbose introductions. Be ultra-concise.";
-      routingReason = `Semantic Classifier: CODE intent (${classificationLatency}ms)`;
+      routingReason = `Agent Code Specialist: Tools enabled (${classificationLatency}ms)`;
     } else if (detectedIntent.includes('VISION')) {
       selectedModel = gemini(MODELS.GEMINI_VISION);
-      systemPrompt = "You are a Multimodal Expert. Provide direct, bulleted visual observations. No filler.";
       routingReason = `Semantic Classifier: VISION intent (${classificationLatency}ms)`;
     } else {
       selectedModel = groq(MODELS.GROQ_FAST);
-      // Ultra-concise general prompt: Strict 2-3 sentence limit
-      systemPrompt = "You are an ultra-concise AI assistant. Provide direct, punchy answers in a MAXIMUM of 2-3 sentences. Cut all polite filler, introductions, and summaries.";
       routingReason = `Semantic Classifier: GENERAL intent (${classificationLatency}ms)`;
     }
 
-    console.log(`📡 [Router] Thread ${activeConversationId} -> ${selectedModel.modelId}`);
+    console.log(`📡 [Router] Thread ${activeConversationId} -> ${selectedModel.modelId} (Tools: ${isCodeSpecialist ? 'ON' : 'OFF'})`);
 
-    // Step E: Stream with Token Ceiling (prevents verbose runaway completions)
     const streamStart = Date.now();
+    const executedTools: Array<{ toolName: string; args: any }> = [];
+    const conversationMessages: any[] = [...messages];
+
+    // =========================================================================
+    // 🤖 PHASE 1: AGENT TOOL EVALUATION & EXECUTION (The ReAct Loop)
+    // =========================================================================
+    if (isCodeSpecialist) {
+      const agentEvaluationPrompt = `You are a Senior Software Architect with access to tools (list_directory, read_file).
+If the user asks about project files, dependencies, code, or architecture, invoke the read_file or list_directory tool with the appropriate filePath or directoryPath.
+Be precise with parameters.`;
+
+      const toolCheck = await generateText({
+        model: selectedModel,
+        system: agentEvaluationPrompt,
+        messages: conversationMessages,
+        tools: projectTools,
+        temperature: 0,
+      });
+
+      if (toolCheck.toolCalls && toolCheck.toolCalls.length > 0) {
+        for (const call of toolCheck.toolCalls) {
+          const toolName = call.toolName;
+          let toolArgs = (call as any).args ?? {};
+
+          // Auto-detect filepath from query if model omitted arguments
+          if (toolName === 'read_file' && !toolArgs.filePath) {
+            const match = lastUserMessage.match(/[\w\-./]+\.(json|ts|tsx|js|jsx|css|html|md)/i);
+            if (match) {
+              toolArgs = { filePath: match[0] };
+            }
+          }
+
+          executedTools.push({ toolName, args: toolArgs });
+          console.log(`🔧 [Agent Action] Invoking tool: ${toolName}`, toolArgs);
+
+          const toolHandler = (projectTools as any)[toolName];
+          if (toolHandler && typeof toolHandler.execute === 'function') {
+            const toolResult = await toolHandler.execute(toolArgs);
+
+            // Inject the real file data from disk into conversation context
+            conversationMessages.push({
+              role: 'assistant',
+              content: `[Inspected disk using tool ${toolName}]`,
+            });
+            conversationMessages.push({
+              role: 'user',
+              content: `Here are the real file findings from disk for ${toolName}:\n\`\`\`json\n${JSON.stringify(toolResult, null, 2)}\n\`\`\`\nPlease answer my original question using this data directly. Provide a clear, concise summary.`,
+            });
+          }
+        }
+      }
+    }
+
+    // =========================================================================
+    // 🚀 PHASE 2: SYNTHESIZE & STREAM THE GROUNDED ANSWER (Zero-Tool Mode)
+    // =========================================================================
+    // Crucial: In Phase 2, explicitly forbid tool calling so Groq streams pure text
+    const synthesisPrompt = `You are an expert Software Architect. 
+All required file data and codebase context have already been retrieved and provided above.
+Directly answer the user's question concisely in 2-3 sentences based on the provided findings.
+Do NOT call any tools. Output clean Markdown only.`;
 
     const result = streamText({
       model: selectedModel,
-      system: systemPrompt,
-      messages,
-      maxOutputTokens: 400,// 👈 Strict token ceiling: cuts latency by up to 70%
+      system: synthesisPrompt,
+      messages: conversationMessages,
+      maxOutputTokens: 600,
     });
 
-    // Step F: Stream to Express Response & Buffer in Memory
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('x-vercel-ai-data-stream', 'v1');
 
@@ -175,7 +224,8 @@ Respond with ONLY the category word: CODE, VISION, or GENERAL. Do not explain.`,
       res.write(`0:${JSON.stringify(chunk)}\n`);
     }
 
-    // Step G: Collect Telemetry
+    console.log("📝 [Streamed Output Length]:", fullAssistantResponse.length, "characters");
+
     const usage = await result.usage;
     const streamLatency = Date.now() - streamStart;
     const totalLatency = classificationLatency + streamLatency;
@@ -186,7 +236,7 @@ Respond with ONLY the category word: CODE, VISION, or GENERAL. Do not explain.`,
 
     console.log(`💾 [DB Commit] Saving turn to Thread ${activeConversationId} (${totalTokens} tokens | ${totalLatency}ms)`);
 
-    // Step H: Persist Assistant Turn & Telemetry to Neon
+    // Persist Assistant Turn & Telemetry to Neon
     await db.insert(messagesTable).values({
       conversationId: activeConversationId,
       role: 'assistant',
@@ -199,18 +249,18 @@ Respond with ONLY the category word: CODE, VISION, or GENERAL. Do not explain.`,
       latencyMs: totalLatency,
     });
 
-    // Update conversation timestamp
     await db
       .update(conversations)
       .set({ updatedAt: new Date() })
       .where(eq(conversations.id, activeConversationId));
 
-    // Step I: Send Metadata frame back to React UI
+    // Send metadata frame with tool execution history to UI
     const metadata = {
       conversationId: activeConversationId,
       model: selectedModel.modelId,
       routingReason,
       latencyMs: totalLatency,
+      tools: executedTools,
       usage: {
         promptTokens: inputTokens,
         completionTokens: outputTokens,
