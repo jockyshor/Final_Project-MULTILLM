@@ -14,15 +14,18 @@
   "dependencies": {
     "@ai-sdk/google": "^4.0.64",
     "@ai-sdk/groq": "^4.0.37",
+    "@neondatabase/serverless": "^1.1.0",
     "ai": "^7.0.93",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.45.2",
     "express": "^5.2.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^26.4.1",
+    "drizzle-kit": "^0.31.10",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }

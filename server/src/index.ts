@@ -5,6 +5,9 @@ import * as dotenv from 'dotenv';
 import { streamText, generateText } from 'ai';
 import { createGroq } from '@ai-sdk/groq';
 import { google } from '@ai-sdk/google';
+import { eq, desc } from 'drizzle-orm';
+import { db } from './db/index.js';
+import { conversations, messages as messagesTable } from './db/schema.js';
 
 // 1. CONFIGURATION
 dotenv.config();
@@ -17,15 +20,12 @@ if (!groqKey) {
   throw new Error("Missing GROQ_API_KEY in server/.env");
 }
 
-const groq = createGroq({
-  apiKey: groqKey,
-});
-
+const groq = createGroq({ apiKey: groqKey });
 const gemini = google;
 
 // VERIFIED LIVE MODEL REGISTRY
 const MODELS = {
-  GROQ_FAST: 'openai/gpt-oss-20b',          // Fast 20B Specialist
+  GROQ_FAST: 'openai/gpt-oss-20b',          // Fast 20B Specialist & Router
   GROQ_REASONING: 'openai/gpt-oss-120b',     // Heavy 120B Code/Reasoning Specialist
   GEMINI_VISION: 'gemini-1.5-flash',
 } as const;
@@ -40,14 +40,79 @@ app.use((req, res, next) => {
   next();
 });
 
+// 4. REST ENDPOINTS FOR HISTORY HYDRATION
 
-// 4. THE SEMANTIC AI ROUTER
+// GET /api/conversations - List all recent conversations
+app.get('/api/conversations', async (req: Request, res: Response) => {
+  try {
+    const list = await db
+      .select()
+      .from(conversations)
+      .orderBy(desc(conversations.updatedAt))
+      .limit(20);
+    res.json(list);
+  } catch (err) {
+    console.error('Failed to list conversations:', err);
+    res.status(500).json({ error: 'Failed to retrieve conversations' });
+  }
+});
+
+// GET /api/conversations/:id - Load full message history of a conversation
+app.get('/api/conversations/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    // Strict type narrowing for Express params
+    if (!id || typeof id !== 'string') {
+      res.status(400).json({ error: 'Valid conversation ID is required' });
+      return;
+    }
+
+    const history = await db
+      .select()
+      .from(messagesTable)
+      .where(eq(messagesTable.conversationId, id))
+      .orderBy(messagesTable.createdAt);
+
+    res.json(history);
+  } catch (err) {
+    console.error('Failed to load conversation history:', err);
+    res.status(500).json({ error: 'Failed to retrieve conversation history' });
+  }
+});
+
+// 5. THE AI ROUTER WITH PERSISTENCE
 app.post('/api/chat', async (req: Request, res: Response) => {
   try {
-    const { messages } = req.body;
+    const { messages, conversationId: clientConversationId } = req.body;
     const lastUserMessage = messages[messages.length - 1]?.content || "";
 
-    // ⏱️ Step A: Fast Semantic Intent Classification (~60-100ms via Groq)
+    // Step A: Ensure conversation thread exists in PostgreSQL
+    let activeConversationId: string = clientConversationId;
+
+    if (!activeConversationId) {
+      const [newConv] = await db
+        .insert(conversations)
+        .values({
+          title: lastUserMessage.slice(0, 45) + (lastUserMessage.length > 45 ? '...' : ''),
+        })
+        .returning();
+
+      if (!newConv) {
+        throw new Error("Failed to initialize conversation in database.");
+      }
+
+      activeConversationId = newConv.id;
+    }
+
+    // Step B: Persist the incoming user message
+    await db.insert(messagesTable).values({
+      conversationId: activeConversationId,
+      role: 'user',
+      content: lastUserMessage,
+    });
+
+    // Step C: Fast Semantic Intent Classification (~60ms)
     const classificationStart = Date.now();
 
     const { text: intentResponse } = await generateText({
@@ -60,15 +125,13 @@ Analyze the user's latest message in context and classify its primary intent int
 
 Respond with ONLY the category word: CODE, VISION, or GENERAL. Do not explain.`,
       prompt: `Latest message: "${lastUserMessage}"\nClassification:`,
-      temperature: 0, // Deterministic
+      temperature: 0,
     });
 
     const detectedIntent = intentResponse.trim().toUpperCase();
     const classificationLatency = Date.now() - classificationStart;
 
-    console.log(`🧠 [Semantic Classifier] Intent: ${detectedIntent} (${classificationLatency}ms)`);
-
-    // 🎯 Step B: Dynamic Specialist Assignment
+    // Step D: Specialist Assignment
     let selectedModel: any;
     let systemPrompt: string;
     let routingReason: string;
@@ -76,37 +139,40 @@ Respond with ONLY the category word: CODE, VISION, or GENERAL. Do not explain.`,
     if (detectedIntent.includes('CODE')) {
       selectedModel = groq(MODELS.GROQ_REASONING);
       systemPrompt = "You are a Senior Software Architect. Provide robust, clean, and modern code solutions.";
-      routingReason = `Semantic Classifier detected CODE intent (${classificationLatency}ms)`;
+      routingReason = `Semantic Classifier: CODE intent (${classificationLatency}ms)`;
     } else if (detectedIntent.includes('VISION')) {
       selectedModel = gemini(MODELS.GEMINI_VISION);
       systemPrompt = "You are a Multimodal Expert. Analyze visual structures and patterns.";
-      routingReason = `Semantic Classifier detected VISION intent (${classificationLatency}ms)`;
+      routingReason = `Semantic Classifier: VISION intent (${classificationLatency}ms)`;
     } else {
       selectedModel = groq(MODELS.GROQ_FAST);
       systemPrompt = "You are a helpful, fast, and concise general AI assistant.";
-      routingReason = `Semantic Classifier detected GENERAL intent (${classificationLatency}ms)`;
+      routingReason = `Semantic Classifier: GENERAL intent (${classificationLatency}ms)`;
     }
 
-    console.log(`📡 [Router] Delegating to: ${selectedModel.modelId}`);
+    console.log(`📡 [Router] Thread ${activeConversationId} -> ${selectedModel.modelId}`);
 
-    // 🚀 Step C: Stream with Full Conversation Continuity
+    // Step E: Initiate Stream
     const streamStart = Date.now();
 
     const result = streamText({
       model: selectedModel,
       system: systemPrompt,
-      messages, // Passes the entire conversation history to whichever specialist was chosen!
+      messages,
     });
 
-    // 6. DIRECT PROTOCOL STREAM BRIDGE
+    // Step F: Stream to Express Response & Buffer in Memory
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('x-vercel-ai-data-stream', 'v1');
 
+    let fullAssistantResponse = '';
+
     for await (const chunk of result.textStream) {
+      fullAssistantResponse += chunk;
       res.write(`0:${JSON.stringify(chunk)}\n`);
     }
 
-    // Capture Token Telemetry
+    // Step G: Collect Telemetry
     const usage = await result.usage;
     const streamLatency = Date.now() - streamStart;
     const totalLatency = classificationLatency + streamLatency;
@@ -115,16 +181,37 @@ Respond with ONLY the category word: CODE, VISION, or GENERAL. Do not explain.`,
     const outputTokens = (usage as any).outputTokens ?? (usage as any).completionTokens ?? 0;
     const totalTokens = (usage as any).totalTokens ?? (inputTokens + outputTokens);
 
-    console.log(`📊 [Telemetry] Model: ${selectedModel.modelId} | Tokens: ${totalTokens} | Total Latency: ${totalLatency}ms`);
+    console.log(`💾 [DB Commit] Saving turn to Thread ${activeConversationId} (${totalTokens} tokens)`);
 
+    // Step H: Persist the Assistant's Response & Telemetry to Neon
+    await db.insert(messagesTable).values({
+      conversationId: activeConversationId,
+      role: 'assistant',
+      content: fullAssistantResponse,
+      model: selectedModel.modelId,
+      routingReason,
+      promptTokens: inputTokens,
+      completionTokens: outputTokens,
+      totalTokens,
+      latencyMs: totalLatency,
+    });
+
+    // Update conversation timestamp
+    await db
+      .update(conversations)
+      .set({ updatedAt: new Date() })
+      .where(eq(conversations.id, activeConversationId));
+
+    // Step I: Send Metadata frame back to React UI
     const metadata = {
+      conversationId: activeConversationId,
       model: selectedModel.modelId,
       routingReason,
       latencyMs: totalLatency,
       usage: {
         promptTokens: inputTokens,
         completionTokens: outputTokens,
-        totalTokens: totalTokens,
+        totalTokens,
       },
     };
 
@@ -140,7 +227,8 @@ Respond with ONLY the category word: CODE, VISION, or GENERAL. Do not explain.`,
     }
   }
 });
-// 7. START SERVER
+
+// 6. START SERVER
 app.listen(PORT, () => {
   console.log(`🚀 MULTILLM 2026 Core active on port ${PORT}`);
 });
