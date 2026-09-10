@@ -81,7 +81,7 @@ app.get('/api/conversations/:id', async (req: Request, res: Response) => {
   }
 });
 
-// 5. THE AI ROUTER WITH PERSISTENCE
+// 5. THE AI ROUTER WITH PERSISTENCE & CONCISE SYSTEM PROMPTS
 app.post('/api/chat', async (req: Request, res: Response) => {
   try {
     const { messages, conversationId: clientConversationId } = req.body;
@@ -105,14 +105,14 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       activeConversationId = newConv.id;
     }
 
-    // Step B: Persist the incoming user message
+    // Step B: Persist incoming user message
     await db.insert(messagesTable).values({
       conversationId: activeConversationId,
       role: 'user',
       content: lastUserMessage,
     });
 
-    // Step C: Fast Semantic Intent Classification (~60ms)
+    // Step C: Fast Semantic Intent Classification (~60ms via Groq)
     const classificationStart = Date.now();
 
     const { text: intentResponse } = await generateText({
@@ -131,34 +131,37 @@ Respond with ONLY the category word: CODE, VISION, or GENERAL. Do not explain.`,
     const detectedIntent = intentResponse.trim().toUpperCase();
     const classificationLatency = Date.now() - classificationStart;
 
-    // Step D: Specialist Assignment
+    // Step D: Specialist Assignment with Ultra-Concise Rules
     let selectedModel: any;
     let systemPrompt: string;
     let routingReason: string;
 
     if (detectedIntent.includes('CODE')) {
       selectedModel = groq(MODELS.GROQ_REASONING);
-      systemPrompt = "You are a Senior Software Architect. Provide robust, clean, and modern code solutions.";
+      // Ultra-concise code prompt: No filler, no conversational preambles
+      systemPrompt = "You are an expert Software Architect. Return ONLY the clean code with a maximum of 1-2 sentences of explanation. Absolutely NO conversational preambles, no filler, and no verbose introductions. Be ultra-concise.";
       routingReason = `Semantic Classifier: CODE intent (${classificationLatency}ms)`;
     } else if (detectedIntent.includes('VISION')) {
       selectedModel = gemini(MODELS.GEMINI_VISION);
-      systemPrompt = "You are a Multimodal Expert. Analyze visual structures and patterns.";
+      systemPrompt = "You are a Multimodal Expert. Provide direct, bulleted visual observations. No filler.";
       routingReason = `Semantic Classifier: VISION intent (${classificationLatency}ms)`;
     } else {
       selectedModel = groq(MODELS.GROQ_FAST);
-      systemPrompt = "You are a helpful, fast, and concise general AI assistant.";
+      // Ultra-concise general prompt: Strict 2-3 sentence limit
+      systemPrompt = "You are an ultra-concise AI assistant. Provide direct, punchy answers in a MAXIMUM of 2-3 sentences. Cut all polite filler, introductions, and summaries.";
       routingReason = `Semantic Classifier: GENERAL intent (${classificationLatency}ms)`;
     }
 
     console.log(`📡 [Router] Thread ${activeConversationId} -> ${selectedModel.modelId}`);
 
-    // Step E: Initiate Stream
+    // Step E: Stream with Token Ceiling (prevents verbose runaway completions)
     const streamStart = Date.now();
 
     const result = streamText({
       model: selectedModel,
       system: systemPrompt,
       messages,
+      maxOutputTokens: 400,// 👈 Strict token ceiling: cuts latency by up to 70%
     });
 
     // Step F: Stream to Express Response & Buffer in Memory
@@ -181,9 +184,9 @@ Respond with ONLY the category word: CODE, VISION, or GENERAL. Do not explain.`,
     const outputTokens = (usage as any).outputTokens ?? (usage as any).completionTokens ?? 0;
     const totalTokens = (usage as any).totalTokens ?? (inputTokens + outputTokens);
 
-    console.log(`💾 [DB Commit] Saving turn to Thread ${activeConversationId} (${totalTokens} tokens)`);
+    console.log(`💾 [DB Commit] Saving turn to Thread ${activeConversationId} (${totalTokens} tokens | ${totalLatency}ms)`);
 
-    // Step H: Persist the Assistant's Response & Telemetry to Neon
+    // Step H: Persist Assistant Turn & Telemetry to Neon
     await db.insert(messagesTable).values({
       conversationId: activeConversationId,
       role: 'assistant',
