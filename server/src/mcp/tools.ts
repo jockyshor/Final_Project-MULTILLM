@@ -13,16 +13,18 @@ function isPathSafe(targetPath: string): boolean {
   return !PROTECTED_PATTERNS.some(pattern => resolved.includes(pattern));
 }
 
-// 2. EXPORT MCP TOOLS (Filesystem + Live Internet + Open-Meteo Weather)
+// 2. EXPORT MCP TOOLS
 export const projectTools = {
   // TOOL 1: list_directory
   list_directory: tool({
-    description: 'List files and directories within a given project folder to explore the codebase structure.',
+    description: 'List files and directories within a given project folder to explore codebase structure.',
     parameters: z.object({
       directoryPath: z.string().optional().describe('Relative folder path from project root (e.g., "." or "server/src")'),
+      path: z.string().optional(),
+      dirPath: z.string().optional(),
     }),
     execute: async (args: any) => {
-      const dirPath = args?.directoryPath || '.';
+      const dirPath = args?.directoryPath || args?.path || args?.dirPath || '.';
       console.log(`🔧 [Tool Execution] list_directory("${dirPath}")`);
 
       if (!isPathSafe(dirPath)) {
@@ -52,11 +54,17 @@ export const projectTools = {
   read_file: tool({
     description: 'Read the text content of a source file within the project.',
     parameters: z.object({
-      filePath: z.string().describe('Relative path to the file from project root (e.g., "server/package.json")'),
+      filePath: z.string().optional().describe('Relative path to the file from project root (e.g., "server/package.json")'),
+      path: z.string().optional(),
+      file: z.string().optional(),
     }),
     execute: async (args: any) => {
-      const rawPath = args?.filePath || args?.path || args?.file || 'server/package.json';
+      const rawPath = args?.filePath || args?.path || args?.file;
       console.log(`🔧 [Tool Execution] read_file("${rawPath}")`);
+
+      if (!rawPath || typeof rawPath !== 'string') {
+        return { error: 'filePath parameter is required to read a file.' };
+      }
 
       if (!isPathSafe(rawPath)) {
         return { error: 'Access Denied: Path is outside project sandbox or accesses protected files (.env).' };
@@ -77,12 +85,12 @@ export const projectTools = {
     },
   } as any),
 
-  // TOOL 3: LIVE WEB SEARCH (DuckDuckGo Instant Knowledge API)
-// TOOL 3: LIVE FACT & WEB SEARCH (Wikipedia Full-Text Engine - Zero Key, High Reliability)
-  web_search: tool({
-    description: 'Search for verified real-world facts, history, sports, public figures, musical artists, and world events.',
+  // TOOL 3: TAVILY LIVE WEB SEARCH
+  browse_web: tool({
+    description: 'Search the live global internet for real-time news, sports match results, scores, champions, and current facts.',
     parameters: z.object({
-      query: z.string().describe('Search query or topic (e.g., "FIFA World Cup winners", "Chappell Roan", "OpenAI")'),
+      query: z.string().describe('Search query for live web search (e.g., "2026 FIFA World Cup final winner score Spain Argentina", "latest news")'),
+      topic: z.string().optional(),
     }),
     execute: async (rawArgs: any) => {
       let args = rawArgs;
@@ -94,57 +102,73 @@ export const projectTools = {
         }
       }
 
-      let query = args?.query || args?.q || args?.search;
+      let query = args?.query || args?.topic || args?.search || args?.q;
       if (typeof query === 'object' && query !== null) {
-        query = query.query || query.q || JSON.stringify(query);
+        query = query.query || query.topic || JSON.stringify(query);
       }
 
       if (!query || typeof query !== 'string') {
         return { error: 'Search query is required.' };
       }
 
-      const cleanQuery = query.trim();
-      console.log(`🌐 [Live Web Search] Querying: "${cleanQuery}"`);
+      const cleanQuery = query.replace(/["'“”]/g, '').trim();
+      const tavilyKey = process.env.TAVILY_API_KEY;
+
+      if (!tavilyKey) {
+        console.error('❌ [Tavily Error] Missing TAVILY_API_KEY in server/.env');
+        return { error: 'TAVILY_API_KEY is missing in server/.env. Please configure it.' };
+      }
+
+      console.log(`🌐 [Live Web Search] Querying Tavily AI: "${cleanQuery}"`);
 
       try {
-        // Step A: Full-text search across live Wikipedia knowledge base
-        const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(cleanQuery)}&utf8=&format=json&origin=*`;
-        const res = await fetch(searchUrl, {
-          headers: { 'User-Agent': 'MULTILLM-Agent/1.0' },
-          signal: AbortSignal.timeout(6000),
+        const res = await fetch('https://api.tavily.com/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            api_key: tavilyKey,
+            query: cleanQuery,
+            search_depth: 'advanced',
+            include_answer: true,
+            max_results: 4,
+          }),
+          signal: AbortSignal.timeout(9000),
         });
 
-        if (!res.ok) throw new Error(`Search API returned status ${res.status}`);
-
-        const data = await res.json();
-        const searchResults = data?.query?.search;
-
-        if (!searchResults || searchResults.length === 0) {
-          return {
-            query: cleanQuery,
-            message: `No verified records found for "${cleanQuery}".`,
-          };
+        if (!res.ok) {
+          const errBody = await res.text();
+          throw new Error(`Tavily HTTP ${res.status}: ${errBody}`);
         }
 
-        // Clean HTML tags (<span class="searchmatch">...</span>) from snippets
-        const results = searchResults.slice(0, 3).map((item: any) => ({
-          title: item.title,
-          snippet: item.snippet.replace(/<\/?[^>]+(>|$)/g, ''),
-          pageUrl: `https://en.wikipedia.org/wiki/${encodeURIComponent(item.title.replace(/\s+/g, '_'))}`,
+        const data = await res.json();
+
+        const results = (data.results || []).map((r: any) => ({
+          title: r.title,
+          content: r.content,
+          url: r.url,
         }));
 
-        return { query: cleanQuery, results };
+        console.log(`✅ [Tavily AI] Retrieved ${results.length} verified live web records.`);
+
+        return {
+          query: cleanQuery,
+          directAnswer: data.answer || null,
+          results,
+        };
       } catch (err: any) {
-        console.error(`[Web Search Error]`, err);
-        return { error: `Web search service error: ${err.message}` };
+        console.error(`[Tavily Search Error]`, err);
+        return { error: `Tavily search failed: ${err.message}` };
       }
     },
   } as any),
-  // TOOL 4: REAL-TIME GLOBAL WEATHER (Open-Meteo Engine - Zero Key, High Reliability)
+
+  // TOOL 4: REAL-TIME GLOBAL WEATHER
   get_weather: tool({
     description: 'Get real-time live weather conditions, temperature, humidity, and wind speed for any city worldwide.',
     parameters: z.object({
-      city: z.string().describe('The name of the city (e.g., "Lima", "Paris", "Tokyo", "New York")'),
+      city: z.string().optional().describe('City name (e.g., "Lima", "Paris", "Tokyo")'),
+      location: z.string().optional(),
+      units: z.string().optional(),
     }),
     execute: async (rawArgs: any) => {
       let args = rawArgs;
@@ -179,34 +203,30 @@ export const projectTools = {
       console.log(`⛅ [Weather Tool] Geocoding & fetching weather for: "${cleanCity}"`);
 
       try {
-        // Step A: Geocode city name to coordinates
-        const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(cleanCity)}&count=1&language=en&format=json`;
+        const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
+          cleanCity
+        )}&count=1&language=en&format=json`;
         const geoRes = await fetch(geoUrl, {
           headers: { 'User-Agent': 'MULTILLM-Agent/1.0' },
           signal: AbortSignal.timeout(6000),
         });
 
-        if (!geoRes.ok) {
-          throw new Error(`Geocoding service returned status ${geoRes.status}`);
-        }
+        if (!geoRes.ok) throw new Error(`Geocoding failed with status ${geoRes.status}`);
 
         const geoData = await geoRes.json();
         if (!geoData.results || geoData.results.length === 0) {
-          return { error: `City "${cleanCity}" could not be found. Please verify spelling.` };
+          return { error: `City "${cleanCity}" could not be found.` };
         }
 
         const { latitude, longitude, name, country } = geoData.results[0];
 
-        // Step B: Query live weather metrics
         const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m&temperature_unit=celsius&wind_speed_unit=kmh`;
         const weatherRes = await fetch(weatherUrl, {
           headers: { 'User-Agent': 'MULTILLM-Agent/1.0' },
           signal: AbortSignal.timeout(6000),
         });
 
-        if (!weatherRes.ok) {
-          throw new Error(`Weather metrics service returned status ${weatherRes.status}`);
-        }
+        if (!weatherRes.ok) throw new Error(`Weather service returned HTTP ${weatherRes.status}`);
 
         const weatherData = await weatherRes.json();
         const current = weatherData.current;
@@ -249,4 +269,3 @@ export const projectTools = {
 };
 
 export { isPathSafe };
-
