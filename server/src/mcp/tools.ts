@@ -74,7 +74,8 @@ export const projectTools = {
 
       try {
         const content = await fs.readFile(fullPath, 'utf-8');
-        const truncated = content.length > 8000 ? content.slice(0, 8000) + '\n...[Truncated]' : content;
+        // Prune file content to 4000 chars to protect TPM limits
+        const truncated = content.length > 4000 ? content.slice(0, 4000) + '\n...[Truncated]' : content;
         return {
           filePath: rawPath,
           content: truncated,
@@ -85,11 +86,11 @@ export const projectTools = {
     },
   } as any),
 
-  // TOOL 3: TAVILY LIVE WEB SEARCH
+  // TOOL 3: TAVILY AI AGENT SEARCH (With Token Compression)
   browse_web: tool({
     description: 'Search the live global internet for real-time news, sports match results, scores, champions, and current facts.',
     parameters: z.object({
-      query: z.string().describe('Search query for live web search (e.g., "2026 FIFA World Cup final winner score Spain Argentina", "latest news")'),
+      query: z.string().describe('Search query for live web search (e.g., "who won the last super bowl", "latest news")'),
       topic: z.string().optional(),
     }),
     execute: async (rawArgs: any) => {
@@ -130,7 +131,7 @@ export const projectTools = {
             query: cleanQuery,
             search_depth: 'advanced',
             include_answer: true,
-            max_results: 4,
+            max_results: 3,
           }),
           signal: AbortSignal.timeout(9000),
         });
@@ -142,13 +143,20 @@ export const projectTools = {
 
         const data = await res.json();
 
-        const results = (data.results || []).map((r: any) => ({
-          title: r.title,
-          content: r.content,
-          url: r.url,
-        }));
+        // 🛡️ TOKEN OPTIMIZATION: Truncate snippets to 350 chars each to stay safely within Groq's 8,000 TPM limit
+        const results = (data.results || []).slice(0, 3).map((r: any) => {
+          let cleanContent = (r.content || '').replace(/\s+/g, ' ').trim();
+          if (cleanContent.length > 350) {
+            cleanContent = cleanContent.slice(0, 350) + '...';
+          }
+          return {
+            title: r.title,
+            snippet: cleanContent,
+            url: r.url,
+          };
+        });
 
-        console.log(`✅ [Tavily AI] Retrieved ${results.length} verified live web records.`);
+        console.log(`✅ [Tavily AI] Retrieved ${results.length} token-compressed live records.`);
 
         return {
           query: cleanQuery,

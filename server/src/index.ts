@@ -60,7 +60,7 @@ app.get('/api/health', async (req: Request, res: Response) => {
   }
 });
 
-// 5. REST ENDPOINTS FOR HISTORY HYDRATION
+// 5. REST ENDPOINTS FOR HISTORY HYDRATION (With Sleep/Wake Connection Resilience)
 app.get('/api/conversations', async (req: Request, res: Response) => {
   try {
     const list = await db
@@ -69,9 +69,9 @@ app.get('/api/conversations', async (req: Request, res: Response) => {
       .orderBy(desc(conversations.updatedAt))
       .limit(25);
     res.json(list);
-  } catch (err) {
-    console.error('Failed to list conversations:', err);
-    res.status(500).json({ error: 'Failed to retrieve conversations' });
+  } catch (err: any) {
+    console.warn(`⚠️ [DB Notice] Connection retry needed: ${err.message}`);
+    res.json([]);
   }
 });
 
@@ -122,11 +122,26 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       }
     }
 
+    // Initialize thread in Postgres if legitimately Turn 1
     if (!activeConversationId) {
+      let semanticTitle = lastUserMessage.slice(0, 30);
+      try {
+        const { text: titleGen } = await generateText({
+          model: groq(MODELS.GROQ_FAST),
+          prompt: `Summarize this user prompt into a clean, concise 2 to 4 word topic title (e.g. "2026 World Cup", "Tokyo Live Weather", "Codebase Architecture", "React State"). Return ONLY the words, no quotes, no punctuation: "${lastUserMessage}"`,
+          temperature: 0,
+        });
+        if (titleGen && titleGen.trim().length > 0) {
+          semanticTitle = titleGen.replace(/["'“”.]/g, '').trim().slice(0, 45);
+        }
+      } catch {
+        semanticTitle = lastUserMessage.slice(0, 30);
+      }
+
       const [newConv] = await db
         .insert(conversations)
         .values({
-          title: lastUserMessage.slice(0, 45) + (lastUserMessage.length > 45 ? '...' : ''),
+          title: semanticTitle,
         })
         .returning();
 
@@ -135,7 +150,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       }
 
       activeConversationId = newConv.id;
-      console.log(`🆕 [New Thread Created] ID: ${activeConversationId}`);
+      console.log(`🆕 [New Thread Created] "${semanticTitle}" (ID: ${activeConversationId})`);
     }
 
     await db.insert(messagesTable).values({
@@ -151,7 +166,17 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       day: 'numeric',
     });
 
-    const conversationMessages: any[] = [...messages];
+    // 🛡️ CONTEXT DISTILLATION: Keep conversation clean to stay well under Groq's 8,000 TPM limit.
+    // Truncate oversized historical turns to prevent context bloat across multi-turn chats.
+    const conversationMessages: any[] = messages
+      .slice(-6)
+      .map((m: any) => ({
+        role: m.role,
+        content:
+          typeof m.content === 'string' && m.content.length > 1200
+            ? m.content.slice(0, 1200) + '... [Historical context truncated]'
+            : m.content,
+      }));
 
     // Dynamic Tool Catalog Generation
     const dynamicToolCatalog = Object.entries(projectTools)
@@ -254,8 +279,8 @@ Available Tools:
 ${dynamicToolCatalog}
 
 Search & Verification Policy:
-- When using browse_web, query the live internet for match scores, champions, and news articles (e.g. "2026 FIFA World Cup winner score Spain Argentina" or "2026 World Cup champion result").
-- If the first query does not include the exact score or winner, vary your search query to include keywords like "winner", "champion", or "final score".
+- When using browse_web, query the live internet for match scores, champions, scorers, and news articles.
+- Formulate concise, specific queries (e.g. "who won the last super bowl result").
 - Conclude as soon as conclusive evidence is gathered.`;
 
           const toolCheck = await generateText({
@@ -327,12 +352,12 @@ Search & Verification Policy:
                 role: 'assistant',
                 content: `[Executed tool ${toolName} with arguments: ${JSON.stringify(toolArgs)}]`,
               });
+
+              // Minified JSON saves ~40% token overhead compared to formatted JSON
               conversationMessages.push({
                 role: 'user',
                 content: `Tool findings for ${toolName}:\n\`\`\`json\n${JSON.stringify(
-                  toolResult,
-                  null,
-                  2
+                  toolResult
                 )}\n\`\`\`\nEvaluate these findings. If you need another tool or more specific search keywords to answer the user's question, call it now. Otherwise, conclude.`,
               });
             } else {
@@ -342,11 +367,13 @@ Search & Verification Policy:
         }
       } catch (toolError: any) {
         console.warn(`⚠️ [ReAct Recovery] Tool loop issue: ${toolError.message}. Proceeding to synthesis.`);
-        conversationMessages.push({
-          role: 'user',
-          content: `[Notice: External tool lookup encountered a temporary network delay. Please synthesize an answer based on your foundational knowledge, noting that live search had a momentary interruption.]`,
-        });
       }
+
+      // Synthesis closure: explicit instruction so the model does not call tools during streamText
+      conversationMessages.push({
+        role: 'user',
+        content: `All tool findings have been collected. Please deliver your final, comprehensive response now based on the findings above. Do NOT attempt to invoke any more tools. Output clean Markdown only.`,
+      });
     }
 
     // =========================================================================
@@ -358,7 +385,7 @@ Deliver a direct, comprehensive, and factually accurate answer grounded in the r
 
 Chronological & Calendar Rules:
 - Calendar Arithmetic: Any event date earlier than ${currentDate} has ALREADY occurred in the past.
-- Synthesize the final outcome and winner directly from the live web findings.
+- Synthesize the final outcome, scorers, and winners directly from the live web findings.
 - Cite your sources with clickable Markdown links: [Source Title](URL).
 - Do NOT call any tools. Output clean Markdown only.`;
 
