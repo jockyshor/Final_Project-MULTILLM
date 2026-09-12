@@ -2,6 +2,7 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { initMcpClient } from './client.js';
 
 // 1. DEFINE SANDBOX BOUNDARY (Project Root)
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
@@ -275,5 +276,13 @@ export const projectTools = {
     },
   } as any),
 };
+
+// Dynamically register remote MCP tools on startup
+initMcpClient().then((mcpTools) => {
+  Object.assign(projectTools, mcpTools);
+  console.log(`⚡ [Tool Registry] Extensible suite loaded. Active tools: [${Object.keys(projectTools).join(', ')}]`);
+}).catch((err) => {
+  console.warn('⚠️ [Tool Registry] MCP dynamic loading skipped:', err.message);
+});
 
 export { isPathSafe };
