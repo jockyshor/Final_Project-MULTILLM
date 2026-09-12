@@ -60,7 +60,7 @@ app.get('/api/health', async (req: Request, res: Response) => {
   }
 });
 
-// 5. REST ENDPOINTS FOR HISTORY HYDRATION (With Sleep/Wake Connection Resilience)
+// 5. REST ENDPOINTS FOR HISTORY HYDRATION (With Sleep/Wake Resilience)
 app.get('/api/conversations', async (req: Request, res: Response) => {
   try {
     const list = await db
@@ -166,8 +166,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       day: 'numeric',
     });
 
-    // 🛡️ CONTEXT DISTILLATION: Keep conversation clean to stay well under Groq's 8,000 TPM limit.
-    // Truncate oversized historical turns to prevent context bloat across multi-turn chats.
+    // 🛡️ CONTEXT DISTILLATION: Slices last 6 turns and truncates oversized payloads
     const conversationMessages: any[] = messages
       .slice(-6)
       .map((m: any) => ({
@@ -184,7 +183,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       .join('\n');
 
     // =========================================================================
-    // 🧠 STAGE 1: MULTI-PROVIDER SUPERVISORY ORCHESTRATOR
+    // 🧠 STAGE 1: MULTI-PROVIDER SUPERVISOR WITH QUERY DISAMBIGUATION
     // =========================================================================
     const supervisorStart = Date.now();
 
@@ -196,7 +195,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     const supervisorPrompt = `You are the Lead Systems Orchestrator for a multi-provider AI platform.
 Current Reference Date: ${currentDate}. You operate with full temporal awareness.
 
-Analyze the user's latest query in conversational context and select the optimal model tier and tool policy:
+Analyze the user's latest query in conversational context and select the optimal model tier, tool policy, and disambiguated search query:
 
 AVAILABLE MULTI-PROVIDER TIERS:
 - "REASONING" [Groq: ${MODELS.GROQ_REASONING}]: Heavy 120B model. REQUIRED for all factual verification, real-world sports, champions, history, codebase analysis, and multi-step tool execution. Has high tool-calling fidelity.
@@ -206,15 +205,21 @@ AVAILABLE MULTI-PROVIDER TIERS:
 AVAILABLE TOOLS:
 ${dynamicToolCatalog}
 
-DECISION RULES:
-1. For ANY question asking about real-world facts, sports champions, winners, events, weather, or codebase files: ALWAYS set "modelTier" to "REASONING" and "needsTools" to TRUE.
-2. Choose "RESEARCH" for long-form comparative essays or deep historical analysis.
-3. Choose "FAST" ONLY for casual conversation or non-tool queries.
+CONTEXTUAL SEARCH QUERY RULES:
+- If tools are needed, synthesize an unambiguous, self-contained search query.
+- Resolve any pronouns ("he", "it", "they") or vague follow-up slang ("the midshow" -> "Super Bowl halftime show performer").
+- Connect follow-up questions to the tournament/team discussed in prior turns.
+- Include the relevant reference year (e.g., 2026 or 2025) so search engines do not pull outdated SEO articles.
 
 Respond ONLY with raw JSON (no markdown, no backticks):
-{"modelTier": "FAST" | "REASONING" | "RESEARCH", "needsTools": boolean, "reasoning": "1-sentence explanation"}`;
+{"modelTier": "FAST" | "REASONING" | "RESEARCH", "needsTools": boolean, "contextualQuery": "self-contained search phrase", "reasoning": "1-sentence explanation"}`;
 
-    let decision = { modelTier: 'REASONING', needsTools: true, reasoning: 'Default to verified reasoning' };
+    let decision = {
+      modelTier: 'REASONING',
+      needsTools: true,
+      contextualQuery: lastUserMessage,
+      reasoning: 'Default to verified reasoning',
+    };
     let supervisorLatency = 50;
 
     try {
@@ -234,7 +239,8 @@ Respond ONLY with raw JSON (no markdown, no backticks):
       decision = {
         modelTier: isFactual ? 'REASONING' : 'FAST',
         needsTools: isFactual,
-        reasoning: 'Heuristic fallback: routed to 120B for factual tool verification',
+        contextualQuery: lastUserMessage,
+        reasoning: 'Heuristic fallback applied',
       };
     }
 
@@ -251,16 +257,16 @@ Respond ONLY with raw JSON (no markdown, no backticks):
     const routingReason = `Supervisor [${decision.modelTier}]: ${decision.reasoning} (${supervisorLatency}ms)`;
 
     console.log(
-      `📡 [Supervisor] Thread ${activeConversationId} -> ${selectedModel.modelId} (Provider: ${
-        decision.modelTier === 'RESEARCH' ? 'Google' : 'Groq'
-      } | Tools: ${needsTools ? 'ON' : 'OFF'}) | Reason: "${decision.reasoning}"`
+      `📡 [Supervisor] Thread ${activeConversationId} -> ${selectedModel.modelId} (Tools: ${
+        needsTools ? 'ON' : 'OFF'
+      } | Query: "${decision.contextualQuery}")`
     );
 
     const streamStart = Date.now();
     const executedTools: Array<{ toolName: string; args: any }> = [];
 
     // =========================================================================
-    // 🤖 STAGE 2: HIGH-CEILING AUTONOMOUS ReAct AGENT LOOP (With Loop Guard)
+    // 🤖 STAGE 2: HIGH-CEILING AUTONOMOUS ReAct AGENT LOOP
     // =========================================================================
     if (needsTools) {
       const MAX_AGENT_STEPS = 5;
@@ -278,9 +284,9 @@ Date Reference: ${currentDate}.
 Available Tools:
 ${dynamicToolCatalog}
 
-Search & Verification Policy:
-- When using browse_web, query the live internet for match scores, champions, scorers, and news articles.
-- Formulate concise, specific queries (e.g. "who won the last super bowl result").
+Search Query Formulation & Autonomous Multi-Hop Rules:
+- When querying browse_web, ALWAYS use self-contained, year-stamped queries (e.g. "${decision.contextualQuery || lastUserMessage}").
+- If your first search returns partial information but lacks the specific detail the user asked for, invoke browse_web AGAIN with a more targeted search query.
 - Conclude as soon as conclusive evidence is gathered.`;
 
           const toolCheck = await generateText({
@@ -291,13 +297,29 @@ Search & Verification Policy:
             temperature: 0,
           });
 
-          if (!toolCheck.toolCalls || toolCheck.toolCalls.length === 0) {
-            console.log(`✅ [ReAct Cycle] Agent satisfied at Step ${currentStep}. Proceeding to synthesis.`);
-            agentNeedsMoreTools = false;
-            break;
+          // 🛡️ Type-safe mutable tool list honoring Vercel AI SDK immutability
+          let activeToolCalls: any[] = [...(toolCheck.toolCalls || [])];
+
+          // Step 1 Failsafe: Enforce browse_web if model tries to skip tools
+          if (activeToolCalls.length === 0) {
+            if (currentStep === 1) {
+              const targetQuery = decision.contextualQuery || lastUserMessage;
+              console.log(`⚡ [Agent Failsafe] Enforcing browse_web with disambiguated query: "${targetQuery}"`);
+              activeToolCalls = [
+                {
+                  toolCallId: `call_${Date.now()}`,
+                  toolName: 'browse_web',
+                  args: { query: targetQuery.replace(/["'“”?]/g, '').trim() },
+                },
+              ];
+            } else {
+              console.log(`✅ [ReAct Cycle] Agent satisfied at Step ${currentStep}. Proceeding to synthesis.`);
+              agentNeedsMoreTools = false;
+              break;
+            }
           }
 
-          for (const call of toolCheck.toolCalls) {
+          for (const call of activeToolCalls) {
             let toolName = call.toolName;
             let toolArgs = (call as any).args ?? {};
 
@@ -321,15 +343,20 @@ Search & Verification Policy:
               toolName = 'browse_web';
             }
 
+            // If query is vague or identical to user message, upgrade with Supervisor's disambiguated query
+            if (toolName === 'browse_web') {
+              const currentQuery = toolArgs.query || toolArgs.topic || '';
+              if (!currentQuery || currentQuery === lastUserMessage) {
+                toolArgs.query = decision.contextualQuery || lastUserMessage;
+              }
+            }
+
             // Clean Parameter Fallbacks
             if (toolName === 'get_weather' && (!toolArgs.city && !toolArgs.location)) {
               const cityMatch =
                 lastUserMessage.match(/(?:in|for|at|of)\s+([A-Za-z\s]+?)(?:\s+(?:today|tomorrow|now|right now|\?|$))/i) ||
                 lastUserMessage.match(/weather\s+(?:in\s+)?([A-Za-z\s]+)/i);
               toolArgs = { city: cityMatch?.[1]?.trim() || lastUserMessage.replace(/weather/i, '').trim() };
-            }
-            if (toolName === 'browse_web' && (!toolArgs.query && !toolArgs.topic)) {
-              toolArgs = { query: lastUserMessage.replace(/["'“”?]/g, '').trim() };
             }
 
             // Deduplication Guard: Break immediately if model repeats the exact same query
@@ -353,7 +380,7 @@ Search & Verification Policy:
                 content: `[Executed tool ${toolName} with arguments: ${JSON.stringify(toolArgs)}]`,
               });
 
-              // Minified JSON saves ~40% token overhead compared to formatted JSON
+              // Minified JSON saves ~40% token overhead
               conversationMessages.push({
                 role: 'user',
                 content: `Tool findings for ${toolName}:\n\`\`\`json\n${JSON.stringify(
@@ -385,7 +412,7 @@ Deliver a direct, comprehensive, and factually accurate answer grounded in the r
 
 Chronological & Calendar Rules:
 - Calendar Arithmetic: Any event date earlier than ${currentDate} has ALREADY occurred in the past.
-- Synthesize the final outcome, scorers, and winners directly from the live web findings.
+- Synthesize the final outcome, performers, and winners directly from the live web findings.
 - Cite your sources with clickable Markdown links: [Source Title](URL).
 - Do NOT call any tools. Output clean Markdown only.`;
 
