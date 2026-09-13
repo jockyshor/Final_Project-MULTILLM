@@ -10,9 +10,12 @@ import { db } from './db/index.js';
 import { conversations, messages as messagesTable } from './db/schema.js';
 import { projectTools } from './mcp/tools.js';
 import { ingestDocument } from './rag/index.js';
-import pdfParse from 'pdf-parse';
-import mammoth from 'mammoth';
 
+// 🛡️ Node ESM Bridge for CommonJS Binary Parsers (pdf-parse & mammoth)
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const pdfParse = require('pdf-parse');
+const mammoth = require('mammoth');
 
 // 1. CONFIGURATION
 dotenv.config();
@@ -35,9 +38,10 @@ const MODELS = {
   GEMINI_RESEARCH: 'gemini-1.5-flash',       // Provider: Google (Deep analysis & 1M context)
 } as const;
 
-// 3. MIDDLEWARE & CORS
+// 3. MIDDLEWARE & CORS (With 25MB Body Limit for PDF/DOCX Base64 Uploads)
 app.use(cors({ origin: 'http://localhost:5173' }));
-app.use(express.json());
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ limit: '25mb', extended: true }));
 
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
@@ -64,7 +68,7 @@ app.get('/api/health', async (req: Request, res: Response) => {
   }
 });
 
-// 5. REST ENDPOINTS FOR HISTORY HYDRATION (With Sleep/Wake Resilience)
+// 5. REST ENDPOINTS FOR HISTORY HYDRATION
 app.get('/api/conversations', async (req: Request, res: Response) => {
   try {
     const list = await db
@@ -100,7 +104,57 @@ app.get('/api/conversations/:id', async (req: Request, res: Response) => {
   }
 });
 
-// 6. MULTI-PROVIDER SUPERVISORY ORCHESTRATOR & UNBOUNDED ReAct AGENT
+// 6. MULTI-FORMAT DOCUMENT RAG INGESTION API (.pdf, .docx, .md, .txt, .json)
+app.post('/api/documents/upload', async (req: Request, res: Response) => {
+  try {
+    const { filename, base64Content, fileType } = req.body;
+    if (!filename || !base64Content) {
+      res.status(400).json({ error: 'Filename and base64Content are required.' });
+      return;
+    }
+
+    const buffer = Buffer.from(base64Content, 'base64');
+    let extractedText = '';
+
+    const lowerFilename = filename.toLowerCase();
+
+    // 📄 Format 1: PDF Extraction
+    if (lowerFilename.endsWith('.pdf')) {
+      console.log(`📑 [RAG Parser] Extracting text from PDF: "${filename}"`);
+      const pdfData = await pdfParse(buffer);
+      extractedText = pdfData.text;
+    } 
+    // 📝 Format 2: Word DOCX Extraction
+    else if (lowerFilename.endsWith('.docx')) {
+      console.log(`📝 [RAG Parser] Extracting text from DOCX: "${filename}"`);
+      const docxResult = await mammoth.extractRawText({ buffer });
+      extractedText = docxResult.value;
+    } 
+    // 📃 Format 3: Plain Text, Markdown, JSON
+    else {
+      extractedText = buffer.toString('utf-8');
+    }
+
+    if (!extractedText || extractedText.trim().length === 0) {
+      res.status(400).json({ error: 'Could not extract any readable text from this file.' });
+      return;
+    }
+
+    // Ingest extracted text into Neon pgvector pipeline
+    const result = await ingestDocument(filename, extractedText, fileType);
+
+    res.json({
+      status: 'success',
+      message: `Document "${filename}" parsed and indexed into Neon pgvector.`,
+      details: result,
+    });
+  } catch (err: any) {
+    console.error('Failed to ingest document:', err);
+    res.status(500).json({ error: `RAG ingestion failed: ${err.message}` });
+  }
+});
+
+// 7. MULTI-PROVIDER SUPERVISORY ORCHESTRATOR & UNBOUNDED ReAct AGENT
 app.post('/api/chat', async (req: Request, res: Response) => {
   let activeConversationId: string = req.body.conversationId || (req.headers['x-conversation-id'] as string);
 
@@ -132,7 +186,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       try {
         const { text: titleGen } = await generateText({
           model: groq(MODELS.GROQ_FAST),
-          prompt: `Summarize this user prompt into a clean, concise 2 to 4 word topic title (e.g. "2026 World Cup", "Tokyo Live Weather", "Codebase Architecture", "React State"). Return ONLY the words, no quotes, no punctuation: "${lastUserMessage}"`,
+          prompt: `Summarize this user prompt into a clean, concise 2 to 4 word topic title (e.g. "2026 World Cup", "Tokyo Live Weather", "Company Policy", "React State"). Return ONLY the words, no quotes, no punctuation: "${lastUserMessage}"`,
           temperature: 0,
         });
         if (titleGen && titleGen.trim().length > 0) {
@@ -170,7 +224,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       day: 'numeric',
     });
 
-    // 🛡️ CONTEXT DISTILLATION: Slices last 6 turns and truncates oversized payloads
+    // 🛡️ CONTEXT DISTILLATION: Keep conversation clean to stay well under Groq's 8,000 TPM limit
     const conversationMessages: any[] = messages
       .slice(-6)
       .map((m: any) => ({
@@ -187,7 +241,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       .join('\n');
 
     // =========================================================================
-    // 🧠 STAGE 1: MULTI-PROVIDER SUPERVISOR WITH QUERY DISAMBIGUATION
+    // 🧠 STAGE 1: MULTI-PROVIDER SUPERVISORY ORCHESTRATOR
     // =========================================================================
     const supervisorStart = Date.now();
 
@@ -199,31 +253,25 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     const supervisorPrompt = `You are the Lead Systems Orchestrator for a multi-provider AI platform.
 Current Reference Date: ${currentDate}. You operate with full temporal awareness.
 
-Analyze the user's latest query in conversational context and select the optimal model tier, tool policy, and disambiguated search query:
+Analyze the user's latest query in conversational context and select the optimal model tier and tool policy:
 
 AVAILABLE MULTI-PROVIDER TIERS:
-- "REASONING" [Groq: ${MODELS.GROQ_REASONING}]: Heavy 120B model. REQUIRED for all factual verification, real-world sports, champions, history, codebase analysis, and multi-step tool execution. Has high tool-calling fidelity.
+- "REASONING" [Groq: ${MODELS.GROQ_REASONING}]: Heavy 120B model. REQUIRED for all factual verification, real-world sports, champions, history, codebase analysis, document RAG search, and multi-step tool execution. Has high tool-calling fidelity.
 - "RESEARCH" [Google: ${MODELS.GEMINI_RESEARCH}]: Google Gemini. Best for deep comparative essays, historical analysis, multi-perspective synthesis, or creative writing.
 - "FAST" [Groq: ${MODELS.GROQ_FAST}]: 20B model. Reserved ONLY for casual conversation ("hi", "how are you"), math, summaries, or simple non-tool chat.
 
 AVAILABLE TOOLS:
 ${dynamicToolCatalog}
 
-CONTEXTUAL SEARCH QUERY RULES:
-- If tools are needed, synthesize an unambiguous, self-contained search query.
-- Resolve any pronouns ("he", "it", "they") or vague follow-up slang ("the midshow" -> "Super Bowl halftime show performer").
-- Connect follow-up questions to the tournament/team discussed in prior turns.
-- Include the relevant reference year (e.g., 2026 or 2025) so search engines do not pull outdated SEO articles.
+DECISION RULES:
+1. For ANY question asking about real-world facts, sports champions, winners, events, weather, uploaded documents, or codebase files: ALWAYS set "modelTier" to "REASONING" and "needsTools" to TRUE.
+2. Choose "RESEARCH" for long-form comparative essays or deep historical analysis.
+3. Choose "FAST" ONLY for casual conversation or non-tool queries.
 
 Respond ONLY with raw JSON (no markdown, no backticks):
-{"modelTier": "FAST" | "REASONING" | "RESEARCH", "needsTools": boolean, "contextualQuery": "self-contained search phrase", "reasoning": "1-sentence explanation"}`;
+{"modelTier": "FAST" | "REASONING" | "RESEARCH", "needsTools": boolean, "reasoning": "1-sentence explanation"}`;
 
-    let decision = {
-      modelTier: 'REASONING',
-      needsTools: true,
-      contextualQuery: lastUserMessage,
-      reasoning: 'Default to verified reasoning',
-    };
+    let decision = { modelTier: 'REASONING', needsTools: true, reasoning: 'Default to verified reasoning' };
     let supervisorLatency = 50;
 
     try {
@@ -239,12 +287,11 @@ Respond ONLY with raw JSON (no markdown, no backticks):
       decision = JSON.parse(sanitized);
     } catch {
       const queryLower = lastUserMessage.toLowerCase();
-      const isFactual = queryLower.includes('who') || queryLower.includes('won') || queryLower.includes('weather') || queryLower.includes('code');
+      const isFactual = queryLower.includes('who') || queryLower.includes('won') || queryLower.includes('weather') || queryLower.includes('code') || queryLower.includes('document');
       decision = {
         modelTier: isFactual ? 'REASONING' : 'FAST',
         needsTools: isFactual,
-        contextualQuery: lastUserMessage,
-        reasoning: 'Heuristic fallback applied',
+        reasoning: 'Heuristic fallback: routed to 120B for tool verification',
       };
     }
 
@@ -261,9 +308,9 @@ Respond ONLY with raw JSON (no markdown, no backticks):
     const routingReason = `Supervisor [${decision.modelTier}]: ${decision.reasoning} (${supervisorLatency}ms)`;
 
     console.log(
-      `📡 [Supervisor] Thread ${activeConversationId} -> ${selectedModel.modelId} (Tools: ${
-        needsTools ? 'ON' : 'OFF'
-      } | Query: "${decision.contextualQuery}")`
+      `📡 [Supervisor] Thread ${activeConversationId} -> ${selectedModel.modelId} (Provider: ${
+        decision.modelTier === 'RESEARCH' ? 'Google' : 'Groq'
+      } | Tools: ${needsTools ? 'ON' : 'OFF'}) | Reason: "${decision.reasoning}"`
     );
 
     const streamStart = Date.now();
@@ -288,9 +335,10 @@ Date Reference: ${currentDate}.
 Available Tools:
 ${dynamicToolCatalog}
 
-Search Query Formulation & Autonomous Multi-Hop Rules:
-- When querying browse_web, ALWAYS use self-contained, year-stamped queries (e.g. "${decision.contextualQuery || lastUserMessage}").
-- If your first search returns partial information but lacks the specific detail the user asked for, invoke browse_web AGAIN with a more targeted search query.
+Search & Verification Policy:
+- For questions about uploaded files, documents, or company policies, invoke search_documents.
+- When using browse_web, query the live internet for match scores, champions, scorers, and news articles.
+- Formulate concise, specific queries (e.g. "who won the last super bowl result").
 - Conclude as soon as conclusive evidence is gathered.`;
 
           const toolCheck = await generateText({
@@ -304,16 +352,20 @@ Search Query Formulation & Autonomous Multi-Hop Rules:
           // 🛡️ Type-safe mutable tool list honoring Vercel AI SDK immutability
           let activeToolCalls: any[] = [...(toolCheck.toolCalls || [])];
 
-          // Step 1 Failsafe: Enforce browse_web if model tries to skip tools
+          // Step 1 Failsafe: Enforce tool execution if model tries to skip tools
           if (activeToolCalls.length === 0) {
             if (currentStep === 1) {
-              const targetQuery = decision.contextualQuery || lastUserMessage;
-              console.log(`⚡ [Agent Failsafe] Enforcing browse_web with disambiguated query: "${targetQuery}"`);
+              const lower = lastUserMessage.toLowerCase();
+              const defaultTool = lower.includes('document') || lower.includes('file') || lower.includes('policy')
+                ? 'search_documents'
+                : 'browse_web';
+
+              console.log(`⚡ [Agent Failsafe] Enforcing ${defaultTool} lookup for: "${lastUserMessage}"`);
               activeToolCalls = [
                 {
                   toolCallId: `call_${Date.now()}`,
-                  toolName: 'browse_web',
-                  args: { query: targetQuery.replace(/["'“”?]/g, '').trim() },
+                  toolName: defaultTool,
+                  args: { query: lastUserMessage.replace(/["'“”?]/g, '').trim() },
                 },
               ];
             } else {
@@ -347,20 +399,18 @@ Search Query Formulation & Autonomous Multi-Hop Rules:
               toolName = 'browse_web';
             }
 
-            // If query is vague or identical to user message, upgrade with Supervisor's disambiguated query
-            if (toolName === 'browse_web') {
-              const currentQuery = toolArgs.query || toolArgs.topic || '';
-              if (!currentQuery || currentQuery === lastUserMessage) {
-                toolArgs.query = decision.contextualQuery || lastUserMessage;
-              }
-            }
-
             // Clean Parameter Fallbacks
             if (toolName === 'get_weather' && (!toolArgs.city && !toolArgs.location)) {
               const cityMatch =
                 lastUserMessage.match(/(?:in|for|at|of)\s+([A-Za-z\s]+?)(?:\s+(?:today|tomorrow|now|right now|\?|$))/i) ||
                 lastUserMessage.match(/weather\s+(?:in\s+)?([A-Za-z\s]+)/i);
               toolArgs = { city: cityMatch?.[1]?.trim() || lastUserMessage.replace(/weather/i, '').trim() };
+            }
+            if (toolName === 'browse_web' && (!toolArgs.query && !toolArgs.topic)) {
+              toolArgs = { query: lastUserMessage.replace(/["'“”?]/g, '').trim() };
+            }
+            if (toolName === 'search_documents' && !toolArgs.query) {
+              toolArgs = { query: lastUserMessage.replace(/["'“”?]/g, '').trim() };
             }
 
             // Deduplication Guard: Break immediately if model repeats the exact same query
@@ -414,9 +464,10 @@ Search Query Formulation & Autonomous Multi-Hop Rules:
 Date Reference: ${currentDate}.
 Deliver a direct, comprehensive, and factually accurate answer grounded in the real tool findings above.
 
-Chronological & Calendar Rules:
+Chronological & Document Rules:
+- Document Findings: If search_documents findings are present, summarize the exact facts and cite the source document name.
 - Calendar Arithmetic: Any event date earlier than ${currentDate} has ALREADY occurred in the past.
-- Synthesize the final outcome, performers, and winners directly from the live web findings.
+- Live Web: Synthesize the final outcome, performers, and winners directly from the live web findings.
 - Cite your sources with clickable Markdown links: [Source Title](URL).
 - Do NOT call any tools. Output clean Markdown only.`;
 
@@ -502,58 +553,7 @@ Chronological & Calendar Rules:
   }
 });
 
-
-// 5. REST ENDPOINT FOR MULTI-FORMAT RAG INGESTION (.txt, .md, .pdf, .docx)
-app.post('/api/documents/upload', async (req: Request, res: Response) => {
-  try {
-    const { filename, base64Content, fileType } = req.body;
-    if (!filename || !base64Content) {
-      res.status(400).json({ error: 'Filename and base64Content are required.' });
-      return;
-    }
-
-    const buffer = Buffer.from(base64Content, 'base64');
-    let extractedText = '';
-
-    const lowerFilename = filename.toLowerCase();
-
-    // 📄 Format 1: PDF Extraction
-    if (lowerFilename.endsWith('.pdf')) {
-      console.log(`📑 [RAG Parser] Extracting text from PDF: "${filename}"`);
-      const pdfData = await pdfParse(buffer);
-      extractedText = pdfData.text;
-    } 
-    // 📝 Format 2: Word DOCX Extraction
-    else if (lowerFilename.endsWith('.docx')) {
-      console.log(`📝 [RAG Parser] Extracting text from DOCX: "${filename}"`);
-      const docxResult = await mammoth.extractRawText({ buffer });
-      extractedText = docxResult.value;
-    } 
-    // 📃 Format 3: Plain Text, Markdown, JSON
-    else {
-      extractedText = buffer.toString('utf-8');
-    }
-
-    if (!extractedText || extractedText.trim().length === 0) {
-      res.status(400).json({ error: 'Could not extract any readable text from this file.' });
-      return;
-    }
-
-    // Ingest extracted plain text into our chunking and pgvector pipeline
-    const result = await ingestDocument(filename, extractedText, fileType);
-
-    res.json({
-      status: 'success',
-      message: `Document "${filename}" parsed and indexed into Neon pgvector.`,
-      details: result,
-    });
-  } catch (err: any) {
-    console.error('Failed to ingest document:', err);
-    res.status(500).json({ error: `RAG ingestion failed: ${err.message}` });
-  }
-});
-
-// 7. START SERVER
+// 8. START SERVER
 app.listen(PORT, () => {
   console.log(`🚀 MULTILLM Core active on port ${PORT}`);
 });
