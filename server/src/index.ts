@@ -38,7 +38,7 @@ const MODELS = {
   GEMINI_RESEARCH: 'gemini-1.5-flash',       // Provider: Google (Deep analysis & 1M context)
 } as const;
 
-// 3. MIDDLEWARE & CORS (With 25MB Body Limit for PDF/DOCX Base64 Uploads)
+// 3. MIDDLEWARE & CORS (With 25MB Body Limit for Base64 PDF/DOCX Ingestion)
 app.use(cors({ origin: 'http://localhost:5173' }));
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ limit: '25mb', extended: true }));
@@ -118,13 +118,13 @@ app.post('/api/documents/upload', async (req: Request, res: Response) => {
 
     const lowerFilename = filename.toLowerCase();
 
-    // 📄 Format 1: PDF Extraction
+    // 📄 Format 1: PDF Binary Extraction
     if (lowerFilename.endsWith('.pdf')) {
       console.log(`📑 [RAG Parser] Extracting text from PDF: "${filename}"`);
       const pdfData = await pdfParse(buffer);
       extractedText = pdfData.text;
     } 
-    // 📝 Format 2: Word DOCX Extraction
+    // 📝 Format 2: Word DOCX Binary Extraction
     else if (lowerFilename.endsWith('.docx')) {
       console.log(`📝 [RAG Parser] Extracting text from DOCX: "${filename}"`);
       const docxResult = await mammoth.extractRawText({ buffer });
@@ -140,7 +140,7 @@ app.post('/api/documents/upload', async (req: Request, res: Response) => {
       return;
     }
 
-    // Ingest extracted text into Neon pgvector pipeline
+    // Ingest extracted plain text into our Neon pgvector chunking pipeline
     const result = await ingestDocument(filename, extractedText, fileType);
 
     res.json({
@@ -186,7 +186,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       try {
         const { text: titleGen } = await generateText({
           model: groq(MODELS.GROQ_FAST),
-          prompt: `Summarize this user prompt into a clean, concise 2 to 4 word topic title (e.g. "2026 World Cup", "Tokyo Live Weather", "Company Policy", "React State"). Return ONLY the words, no quotes, no punctuation: "${lastUserMessage}"`,
+          prompt: `Summarize this user prompt into a clean, concise 2 to 4 word topic title (e.g. "2026 World Cup", "Tokyo Live Weather", "DIY Gel Nails", "React State"). Return ONLY the words, no quotes, no punctuation: "${lastUserMessage}"`,
           temperature: 0,
         });
         if (titleGen && titleGen.trim().length > 0) {
@@ -256,22 +256,22 @@ Current Reference Date: ${currentDate}. You operate with full temporal awareness
 Analyze the user's latest query in conversational context and select the optimal model tier and tool policy:
 
 AVAILABLE MULTI-PROVIDER TIERS:
-- "REASONING" [Groq: ${MODELS.GROQ_REASONING}]: Heavy 120B model. REQUIRED for all factual verification, real-world sports, champions, history, codebase analysis, document RAG search, and multi-step tool execution. Has high tool-calling fidelity.
+- "REASONING" [Groq: ${MODELS.GROQ_REASONING}]: Heavy 120B model. REQUIRED for all factual verification, real-world sports, champions, history, codebase analysis, uploaded document RAG, and multi-step tool execution. Has high tool-calling fidelity.
 - "RESEARCH" [Google: ${MODELS.GEMINI_RESEARCH}]: Google Gemini. Best for deep comparative essays, historical analysis, multi-perspective synthesis, or creative writing.
-- "FAST" [Groq: ${MODELS.GROQ_FAST}]: 20B model. Reserved ONLY for casual conversation ("hi", "how are you"), math, summaries, or simple non-tool chat.
+- "FAST" [Groq: ${MODELS.GROQ_FAST}]: 20B model. Reserved for general knowledge, how-to tutorials, recipes, casual conversation ("hi"), math, summaries, or simple non-tool chat.
 
 AVAILABLE TOOLS:
 ${dynamicToolCatalog}
 
 DECISION RULES:
-1. For ANY question asking about real-world facts, sports champions, winners, events, weather, uploaded documents, or codebase files: ALWAYS set "modelTier" to "REASONING" and "needsTools" to TRUE.
-2. Choose "RESEARCH" for long-form comparative essays or deep historical analysis.
-3. Choose "FAST" ONLY for casual conversation or non-tool queries.
+1. For questions asking about real-world facts, sports champions, winners, live weather, uploaded documents, or codebase files: set "modelTier" to "REASONING" and "needsTools" to TRUE.
+2. For how-to guides, tutorials (e.g. gel nails, cooking), creative writing, greetings, or conceptual advice: set "modelTier" to "FAST" and "needsTools" to FALSE.
+3. Choose "RESEARCH" for long-form comparative essays or deep historical analysis.
 
 Respond ONLY with raw JSON (no markdown, no backticks):
 {"modelTier": "FAST" | "REASONING" | "RESEARCH", "needsTools": boolean, "reasoning": "1-sentence explanation"}`;
 
-    let decision = { modelTier: 'REASONING', needsTools: true, reasoning: 'Default to verified reasoning' };
+    let decision = { modelTier: 'FAST', needsTools: false, reasoning: 'Default to conversational fast mode' };
     let supervisorLatency = 50;
 
     try {
@@ -287,11 +287,17 @@ Respond ONLY with raw JSON (no markdown, no backticks):
       decision = JSON.parse(sanitized);
     } catch {
       const queryLower = lastUserMessage.toLowerCase();
-      const isFactual = queryLower.includes('who') || queryLower.includes('won') || queryLower.includes('weather') || queryLower.includes('code') || queryLower.includes('document');
+      const isFactual =
+        queryLower.includes('who') ||
+        queryLower.includes('won') ||
+        queryLower.includes('weather') ||
+        queryLower.includes('code') ||
+        queryLower.includes('document') ||
+        queryLower.includes('file');
       decision = {
         modelTier: isFactual ? 'REASONING' : 'FAST',
         needsTools: isFactual,
-        reasoning: 'Heuristic fallback: routed to 120B for tool verification',
+        reasoning: 'Heuristic fallback applied',
       };
     }
 
@@ -336,7 +342,7 @@ Available Tools:
 ${dynamicToolCatalog}
 
 Search & Verification Policy:
-- For questions about uploaded files, documents, or company policies, invoke search_documents.
+- For questions about uploaded files, documents, or CVs, invoke search_documents.
 - When using browse_web, query the live internet for match scores, champions, scorers, and news articles.
 - Formulate concise, specific queries (e.g. "who won the last super bowl result").
 - Conclude as soon as conclusive evidence is gathered.`;
@@ -349,16 +355,15 @@ Search & Verification Policy:
             temperature: 0,
           });
 
-          // 🛡️ Type-safe mutable tool list honoring Vercel AI SDK immutability
           let activeToolCalls: any[] = [...(toolCheck.toolCalls || [])];
 
-          // Step 1 Failsafe: Enforce tool execution if model tries to skip tools
           if (activeToolCalls.length === 0) {
             if (currentStep === 1) {
               const lower = lastUserMessage.toLowerCase();
-              const defaultTool = lower.includes('document') || lower.includes('file') || lower.includes('policy')
-                ? 'search_documents'
-                : 'browse_web';
+              const defaultTool =
+                lower.includes('document') || lower.includes('file') || lower.includes('cv') || lower.includes('resume')
+                  ? 'search_documents'
+                  : 'browse_web';
 
               console.log(`⚡ [Agent Failsafe] Enforcing ${defaultTool} lookup for: "${lastUserMessage}"`);
               activeToolCalls = [
@@ -413,7 +418,7 @@ Search & Verification Policy:
               toolArgs = { query: lastUserMessage.replace(/["'“”?]/g, '').trim() };
             }
 
-            // Deduplication Guard: Break immediately if model repeats the exact same query
+            // Deduplication Guard
             const callSignature = `${toolName}:${JSON.stringify(toolArgs)}`;
             if (executedToolSignatures.has(callSignature)) {
               console.log(`⏹️ [ReAct Dedup] Duplicate tool call detected (${toolName}). Breaking loop to prevent thrashing.`);
@@ -434,7 +439,6 @@ Search & Verification Policy:
                 content: `[Executed tool ${toolName} with arguments: ${JSON.stringify(toolArgs)}]`,
               });
 
-              // Minified JSON saves ~40% token overhead
               conversationMessages.push({
                 role: 'user',
                 content: `Tool findings for ${toolName}:\n\`\`\`json\n${JSON.stringify(
@@ -450,7 +454,6 @@ Search & Verification Policy:
         console.warn(`⚠️ [ReAct Recovery] Tool loop issue: ${toolError.message}. Proceeding to synthesis.`);
       }
 
-      // Synthesis closure: explicit instruction so the model does not call tools during streamText
       conversationMessages.push({
         role: 'user',
         content: `All tool findings have been collected. Please deliver your final, comprehensive response now based on the findings above. Do NOT attempt to invoke any more tools. Output clean Markdown only.`,
@@ -460,7 +463,12 @@ Search & Verification Policy:
     // =========================================================================
     // 🚀 STAGE 3: SYNTHESIZE & STREAM GROUNDED ANSWER (Zero-Tool Mode)
     // =========================================================================
-    const synthesisPrompt = `You are a helpful, versatile Senior AI Assistant.
+    // 🛡️ DUAL PROMPT PATTERN: If tools were OFF, use a clean conversational prompt with ZERO mentions of tools!
+    const cleanConversationalPrompt = `You are a helpful, versatile Senior AI Assistant.
+Deliver a direct, detailed, and beautifully structured response in clean Markdown.
+Be encouraging, clear, and actionable.`;
+
+    const toolGroundedSynthesisPrompt = `You are a helpful, versatile Senior AI Assistant.
 Date Reference: ${currentDate}.
 Deliver a direct, comprehensive, and factually accurate answer grounded in the real tool findings above.
 
@@ -471,9 +479,11 @@ Chronological & Document Rules:
 - Cite your sources with clickable Markdown links: [Source Title](URL).
 - Do NOT call any tools. Output clean Markdown only.`;
 
+    const activeSystemPrompt = needsTools ? toolGroundedSynthesisPrompt : cleanConversationalPrompt;
+
     const result = streamText({
       model: selectedModel,
-      system: synthesisPrompt,
+      system: activeSystemPrompt,
       messages: conversationMessages,
       maxOutputTokens: 800,
     });

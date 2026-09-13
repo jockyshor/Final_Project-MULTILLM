@@ -311,13 +311,15 @@ export const projectTools: Record<string, any> = {
 
 
 // 3. DYNAMICALLY REGISTER REMOTE MCP TOOLS ON STARTUP
-initMcpClient()
-  .then((mcpTools) => {
-    Object.assign(projectTools, mcpTools);
-    console.log(`⚡ [Tool Registry] Extensible suite loaded. Active tools: [${Object.keys(projectTools).join(', ')}]`);
-  })
-  .catch((err) => {
-    console.warn('⚠️ [Tool Registry] MCP dynamic loading notice:', err.message);
-  });
-
+// 🛡️ TEST RUNNER GUARD: Do not spawn background MCP child process during unit testing (prevents EPIPE)
+if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+  initMcpClient()
+    .then((mcpTools) => {
+      Object.assign(projectTools, mcpTools);
+      console.log(`⚡ [Tool Registry] Extensible suite loaded. Active tools: [${Object.keys(projectTools).join(', ')}]`);
+    })
+    .catch((err) => {
+      console.warn('⚠️ [Tool Registry] MCP dynamic loading notice:', err.message);
+    });
+}
 export { isPathSafe };

@@ -1,8 +1,15 @@
-
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import * as os from 'node:os';
+
+// 🛡️ PIPE DEFENSE: Exit cleanly if parent process closes stdio without throwing uncaught EPIPE
+process.stdout.on('error', (err: any) => {
+  if (err.code === 'EPIPE') process.exit(0);
+});
+process.stdin.on('close', () => {
+  process.exit(0);
+});
 
 // 1. INITIALIZE STANDALONE MCP SERVER
 const server = new McpServer({
