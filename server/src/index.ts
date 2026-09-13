@@ -9,6 +9,10 @@ import { eq, desc, sql } from 'drizzle-orm';
 import { db } from './db/index.js';
 import { conversations, messages as messagesTable } from './db/schema.js';
 import { projectTools } from './mcp/tools.js';
+import { ingestDocument } from './rag/index.js';
+import pdfParse from 'pdf-parse';
+import mammoth from 'mammoth';
+
 
 // 1. CONFIGURATION
 dotenv.config();
@@ -495,6 +499,57 @@ Chronological & Calendar Rules:
       "I encountered a momentary connection issue with the external provider. Please try asking your question again in a moment.";
     res.write(`0:${JSON.stringify(gracefulMessage)}\n`);
     res.end();
+  }
+});
+
+
+// 5. REST ENDPOINT FOR MULTI-FORMAT RAG INGESTION (.txt, .md, .pdf, .docx)
+app.post('/api/documents/upload', async (req: Request, res: Response) => {
+  try {
+    const { filename, base64Content, fileType } = req.body;
+    if (!filename || !base64Content) {
+      res.status(400).json({ error: 'Filename and base64Content are required.' });
+      return;
+    }
+
+    const buffer = Buffer.from(base64Content, 'base64');
+    let extractedText = '';
+
+    const lowerFilename = filename.toLowerCase();
+
+    // 📄 Format 1: PDF Extraction
+    if (lowerFilename.endsWith('.pdf')) {
+      console.log(`📑 [RAG Parser] Extracting text from PDF: "${filename}"`);
+      const pdfData = await pdfParse(buffer);
+      extractedText = pdfData.text;
+    } 
+    // 📝 Format 2: Word DOCX Extraction
+    else if (lowerFilename.endsWith('.docx')) {
+      console.log(`📝 [RAG Parser] Extracting text from DOCX: "${filename}"`);
+      const docxResult = await mammoth.extractRawText({ buffer });
+      extractedText = docxResult.value;
+    } 
+    // 📃 Format 3: Plain Text, Markdown, JSON
+    else {
+      extractedText = buffer.toString('utf-8');
+    }
+
+    if (!extractedText || extractedText.trim().length === 0) {
+      res.status(400).json({ error: 'Could not extract any readable text from this file.' });
+      return;
+    }
+
+    // Ingest extracted plain text into our chunking and pgvector pipeline
+    const result = await ingestDocument(filename, extractedText, fileType);
+
+    res.json({
+      status: 'success',
+      message: `Document "${filename}" parsed and indexed into Neon pgvector.`,
+      details: result,
+    });
+  } catch (err: any) {
+    console.error('Failed to ingest document:', err);
+    res.status(500).json({ error: `RAG ingestion failed: ${err.message}` });
   }
 });
 

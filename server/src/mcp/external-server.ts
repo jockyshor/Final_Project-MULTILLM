@@ -1,15 +1,16 @@
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import * as os from 'node:os';
 
-// 1. INITIALIZE OFFICIAL MCP SERVER
+// 1. INITIALIZE STANDALONE MCP SERVER
 const server = new McpServer({
   name: 'multillm-standalone-mcp-server',
   version: '1.0.0',
 });
 
-// 2. REGISTER MCP TOOL 1: Live Host & Process Metrics
+// 2. REGISTER TOOL 1: Live Server/Host Telemetry
 server.tool(
   'get_system_metrics',
   'Get real-time host operating system statistics, CPU architecture, free RAM, memory usage percentage, and system uptime.',
@@ -43,7 +44,7 @@ server.tool(
   }
 );
 
-// 3. REGISTER MCP TOOL 2: Safe External Web Page Inspector
+// 3. REGISTER TOOL 2: Clean URL Inspector
 server.tool(
   'fetch_webpage',
   'Safely fetch any external HTTP/HTTPS URL and extract cleaned text content for analysis.',
@@ -60,7 +61,6 @@ server.tool(
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
 
       const html = await res.text();
-      // Strip script and style tags to conserve tokens
       const cleanText = html
         .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
         .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
@@ -91,6 +91,6 @@ server.tool(
   }
 );
 
-// 4. CONNECT VIA STDIO TRANSPORT
+// 4. CONNECT TO STDIO TRANSPORT
 const transport = new StdioServerTransport();
 await server.connect(transport);

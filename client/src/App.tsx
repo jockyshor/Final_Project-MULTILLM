@@ -43,6 +43,11 @@ export default function App() {
   const [isMobile, setIsMobile] = useState(false);
   const isResizingRef = useRef(false);
 
+  // Multi-Format RAG Document Upload States
+  const [isUploadingDoc, setIsUploadingDoc] = useState(false);
+  const [uploadedDocNotice, setUploadedDocNotice] = useState<{ filename: string; chunks: number } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   // Metadata cache for routing badges
   const [metadataMap, setMetadataMap] = useState<Record<string, MessageMetadata>>({});
 
@@ -172,7 +177,6 @@ export default function App() {
     startNewConversation();
   };
 
-  // Unhide all threads if desired
   const restoreAllThreads = () => {
     localStorage.removeItem('multillm_hidden_threads');
     setHiddenThreadIds([]);
@@ -199,7 +203,58 @@ export default function App() {
     document.body.style.userSelect = 'auto';
   };
 
-  // Filter out hidden threads
+  // Multi-Format File Upload Handler (Base64 for .pdf, .docx, .txt, .md, .json)
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsUploadingDoc(true);
+    const reader = new FileReader();
+
+    reader.onload = async () => {
+      try {
+        const rawResult = reader.result as string;
+        // Strip data:application/pdf;base64, prefix to get pure base64 payload
+        const base64Data = rawResult.split(',')[1];
+
+        const res = await fetch('http://localhost:5001/api/documents/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: file.name,
+            base64Content: base64Data,
+            fileType: file.type || 'application/octet-stream',
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          setUploadedDocNotice({
+            filename: file.name,
+            chunks: data.details?.chunksCount || 1,
+          });
+        } else {
+          const errData = await res.json();
+          alert(`Document indexing failed: ${errData.error || 'Check server logs.'}`);
+        }
+      } catch (err: any) {
+        console.error('Failed to upload file:', err);
+        alert('Network error while uploading document.');
+      } finally {
+        setIsUploadingDoc(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
+    };
+
+    reader.onerror = () => {
+      alert('Failed to read file.');
+      setIsUploadingDoc(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
+    reader.readAsDataURL(file);
+  };
+
   const visibleConversations = conversations.filter(
     (c) => !hiddenThreadIds.includes(c.id)
   );
@@ -278,7 +333,6 @@ export default function App() {
                   >
                     <span className="truncate pr-4 font-medium">{conv.title || 'Untitled Discussion'}</span>
 
-                    {/* Discrete × button on hover (soft-deletes from view) */}
                     <button
                       onClick={(e) => hideThread(conv.id, e)}
                       title="Hide thread from view"
@@ -315,7 +369,6 @@ export default function App() {
                 Connected Specialist Brains
               </div>
               <div className="space-y-1.5 text-[11px]">
-                {/* Brain 1: Groq Fast */}
                 <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-white/[0.03] border border-white/[0.02]">
                   <span className="flex items-center gap-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400/50 animate-pulse" />
@@ -324,7 +377,6 @@ export default function App() {
                   <span className="text-[10px] font-mono text-neutral-500">Fast Triage</span>
                 </div>
 
-                {/* Brain 2: Groq Reasoning */}
                 <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-white/[0.03] border border-white/[0.02]">
                   <span className="flex items-center gap-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-[#0071E3] shadow-sm shadow-[#0071E3]/50" />
@@ -333,7 +385,6 @@ export default function App() {
                   <span className="text-[10px] font-mono text-[#0071E3]">Reasoning Agent</span>
                 </div>
 
-                {/* Brain 3: Google Gemini */}
                 <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-white/[0.03] border border-white/[0.02]">
                   <span className="flex items-center gap-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-purple-400 shadow-sm shadow-purple-400/50" />
@@ -344,7 +395,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Draggable Resizer (Desktop Only) */}
             {!isMobile && (
               <div
                 onMouseDown={startResizing}
@@ -359,7 +409,7 @@ export default function App() {
       {/* 2. RESPONSIVE CHAT WORKSPACE (Mobile to 4K Ultrawide)                */}
       {/* =================================================================== */}
       <main className="flex-1 flex flex-col h-full relative overflow-hidden bg-[#0A0A0C]">
-        {/* Top Minimal Navigation Bar */}
+        {/* Top Navigation Bar */}
         <header className="h-12 border-b border-[#1E1E22] flex items-center justify-between px-4 z-10 bg-[#0A0A0C]/80 backdrop-blur-md">
           <div className="flex items-center gap-2">
             {!isSidebarOpen && (
@@ -397,7 +447,7 @@ export default function App() {
               </div>
               <h2 className="text-sm font-semibold tracking-tight text-white">Autonomous Multi-Model Stack</h2>
               <p className="text-xs text-neutral-400 leading-relaxed">
-                Triage router across Groq LPUs and Google Gemini, autonomous ReAct loops, Tavily live web grounding, and sandboxed codebase tools.
+                Triage router across Groq LPUs and Google Gemini, autonomous ReAct loops, Tavily live web grounding, MCP host tools, and Semantic pgvector RAG.
               </p>
             </div>
           )}
@@ -408,7 +458,6 @@ export default function App() {
 
             return (
               <div key={m.id} className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} w-full`}>
-                {/* Chat Bubble */}
                 <div
                   className={`w-fit max-w-[95%] sm:max-w-[85%] md:max-w-[80%] rounded-2xl px-4 py-3 text-xs sm:text-sm leading-relaxed ${
                     isUser
@@ -469,16 +518,57 @@ export default function App() {
 
         {/* Bottom Responsive Input Bar */}
         <div className="p-4 border-t border-[#1E1E22] bg-[#0A0A0C]/90 backdrop-blur-md">
+          {/* RAG Upload Success Notice */}
+          {uploadedDocNotice && (
+            <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between px-3 py-1.5 rounded-xl bg-[#0071E3]/15 border border-[#0071E3]/30 text-xs text-[#0071E3] animate-fadeIn">
+              <span className="flex items-center gap-1.5 font-medium truncate">
+                <span>📄</span>
+                <span>Indexed "{uploadedDocNotice.filename}" into Neon pgvector ({uploadedDocNotice.chunks} chunks)</span>
+              </span>
+              <button
+                onClick={() => setUploadedDocNotice(null)}
+                className="p-0.5 hover:bg-white/10 rounded text-neutral-400 hover:text-white transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
           <form
             onSubmit={handleSubmit}
             className="max-w-3xl mx-auto flex items-center gap-2 bg-[#151518] border border-[#26262C] focus-within:border-[#0071E3] focus-within:ring-2 focus-within:ring-[#0071E3]/20 rounded-2xl px-3 py-1.5 transition-all shadow-lg"
           >
+            {/* Hidden File Input for RAG Supporting .pdf, .docx, .txt, .md, .json */}
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileUpload}
+              accept=".txt,.md,.markdown,.json,.pdf,.docx"
+              className="hidden"
+            />
+
+            {/* Paperclip Button for File Ingestion */}
+            <button
+              type="button"
+              disabled={isUploadingDoc}
+              onClick={() => fileInputRef.current?.click()}
+              title="Attach document to index into Neon pgvector (.pdf, .docx, .txt, .md, .json)"
+              className={`w-7 h-7 rounded-lg flex items-center justify-center text-neutral-400 hover:text-white hover:bg-white/[0.06] transition-colors ${
+                isUploadingDoc ? 'animate-pulse text-[#0071E3]' : ''
+              }`}
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+              </svg>
+            </button>
+
             <input
               value={input}
               onChange={handleInputChange}
-              placeholder="Ask anything, inspect codebase files, or search live web..."
+              placeholder={isUploadingDoc ? "Parsing and indexing document into pgvector..." : "Ask anything, query uploaded documents, inspect code..."}
               className="flex-1 bg-transparent border-none outline-none text-xs sm:text-sm text-neutral-100 placeholder-neutral-500 select-text py-1.5"
             />
+
             <button
               type="submit"
               disabled={isLoading || !input.trim()}

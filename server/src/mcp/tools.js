@@ -2,6 +2,7 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { initMcpClient } from './client.js';
 // 1. DEFINE SANDBOX BOUNDARY (Project Root)
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const PROTECTED_PATTERNS = ['.env', '.git', 'node_modules'];
@@ -65,7 +66,6 @@ export const projectTools = {
             const fullPath = path.resolve(PROJECT_ROOT, rawPath);
             try {
                 const content = await fs.readFile(fullPath, 'utf-8');
-                // Prune file content to 4000 chars to protect TPM limits
                 const truncated = content.length > 4000 ? content.slice(0, 4000) + '\n...[Truncated]' : content;
                 return {
                     filePath: rawPath,
@@ -126,7 +126,6 @@ export const projectTools = {
                     throw new Error(`Tavily HTTP ${res.status}: ${errBody}`);
                 }
                 const data = await res.json();
-                // 🛡️ TOKEN OPTIMIZATION: Truncate snippets to 350 chars each to stay safely within Groq's 8,000 TPM limit
                 const results = (data.results || []).slice(0, 3).map((r) => {
                     let cleanContent = (r.content || '').replace(/\s+/g, ' ').trim();
                     if (cleanContent.length > 350) {
@@ -242,5 +241,14 @@ export const projectTools = {
         },
     }),
 };
+// 3. DYNAMICALLY REGISTER REMOTE MCP TOOLS ON STARTUP
+initMcpClient()
+    .then((mcpTools) => {
+    Object.assign(projectTools, mcpTools);
+    console.log(`⚡ [Tool Registry] Extensible suite loaded. Active tools: [${Object.keys(projectTools).join(', ')}]`);
+})
+    .catch((err) => {
+    console.warn('⚠️ [Tool Registry] MCP dynamic loading notice:', err.message);
+});
 export { isPathSafe };
 //# sourceMappingURL=tools.js.map

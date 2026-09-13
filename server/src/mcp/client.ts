@@ -8,18 +8,22 @@ let mcpClient: Client | null = null;
 
 /**
  * Connects to our dedicated background MCP Server process via Stdio Transport.
- * Performs dynamic JSON-RPC capability discovery on startup.
+ * Environment-aware: runs via tsx in local development, and via node on dist/ in production Docker.
  */
 export async function initMcpClient(): Promise<Record<string, any>> {
   try {
-    console.log('🔌 [MCP Client] Spawning background MCP Server process over stdio...');
+    const isProduction = process.env.NODE_ENV === 'production';
 
-    const serverScriptPath = path.resolve(process.cwd(), 'src/mcp/external-server.ts');
+    // 🛡️ DOCKER COMPATIBILITY: In production Docker, use compiled dist/ JS. In dev, use src/ TS.
+    const serverScriptPath = isProduction
+      ? path.resolve(process.cwd(), 'dist/mcp/external-server.js')
+      : path.resolve(process.cwd(), 'src/mcp/external-server.ts');
 
-    // Spawn our standalone MCP Server process
+    console.log(`🔌 [MCP Client] Spawning MCP server [Env: ${isProduction ? 'PRODUCTION (dist)' : 'DEVELOPMENT (src)'}]`);
+
     const transport = new StdioClientTransport({
-      command: 'npx',
-      args: ['tsx', serverScriptPath],
+      command: isProduction ? 'node' : 'npx',
+      args: isProduction ? [serverScriptPath] : ['tsx', serverScriptPath],
     });
 
     mcpClient = new Client(

@@ -3,6 +3,8 @@ import { z } from 'zod';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { initMcpClient } from './client.js';
+import { searchSimilarChunks } from '../rag/index.js';
+
 
 // 1. DEFINE SANDBOX BOUNDARY (Project Root)
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
@@ -15,7 +17,7 @@ function isPathSafe(targetPath: string): boolean {
 }
 
 // 2. EXPORT MCP TOOLS
-export const projectTools = {
+export const projectTools: Record<string, any> = {
   // TOOL 1: list_directory
   list_directory: tool({
     description: 'List files and directories within a given project folder to explore codebase structure.',
@@ -75,7 +77,6 @@ export const projectTools = {
 
       try {
         const content = await fs.readFile(fullPath, 'utf-8');
-        // Prune file content to 4000 chars to protect TPM limits
         const truncated = content.length > 4000 ? content.slice(0, 4000) + '\n...[Truncated]' : content;
         return {
           filePath: rawPath,
@@ -144,7 +145,6 @@ export const projectTools = {
 
         const data = await res.json();
 
-        // 🛡️ TOKEN OPTIMIZATION: Truncate snippets to 350 chars each to stay safely within Groq's 8,000 TPM limit
         const results = (data.results || []).slice(0, 3).map((r: any) => {
           let cleanContent = (r.content || '').replace(/\s+/g, ' ').trim();
           if (cleanContent.length > 350) {
@@ -275,14 +275,49 @@ export const projectTools = {
       }
     },
   } as any),
+
+  // TOOL 5: SEMANTIC DOCUMENT RAG (Neon pgvector Cosine Similarity)
+  search_documents: tool({
+    description: 'Search through uploaded company documents, PDF extracts, text files, and notes using semantic vector similarity in PostgreSQL.',
+    parameters: z.object({
+      query: z.string().describe('The concept, question, or keyword to match against uploaded documents'),
+    }),
+    execute: async ({ query }: { query: string }) => {
+      console.log(`📚 [RAG Tool] Searching uploaded documents for: "${query}"`);
+      try {
+        const matches = await searchSimilarChunks(query, 3);
+        if (!matches || matches.length === 0) {
+          return {
+            query,
+            message: 'No matching records found in uploaded documents. Suggest uploading relevant files first.',
+          };
+        }
+
+        return {
+          query,
+          matchedChunks: matches.map((m) => ({
+            sourceDocument: m.filename,
+            relevanceScore: m.similarity ? `${Math.round(m.similarity * 100)}%` : 'N/A',
+            excerpt: m.content,
+          })),
+        };
+      } catch (err: any) {
+        console.error('❌ [RAG Tool Error]', err);
+        return { error: `Document search failed: ${err.message}` };
+      }
+    },
+  } as any),
 };
 
-// Dynamically register remote MCP tools on startup
-initMcpClient().then((mcpTools) => {
-  Object.assign(projectTools, mcpTools);
-  console.log(`⚡ [Tool Registry] Extensible suite loaded. Active tools: [${Object.keys(projectTools).join(', ')}]`);
-}).catch((err) => {
-  console.warn('⚠️ [Tool Registry] MCP dynamic loading skipped:', err.message);
-});
+
+// 3. DYNAMICALLY REGISTER REMOTE MCP TOOLS ON STARTUP
+initMcpClient()
+  .then((mcpTools) => {
+    Object.assign(projectTools, mcpTools);
+    console.log(`⚡ [Tool Registry] Extensible suite loaded. Active tools: [${Object.keys(projectTools).join(', ')}]`);
+  })
+  .catch((err) => {
+    console.warn('⚠️ [Tool Registry] MCP dynamic loading notice:', err.message);
+  });
 
 export { isPathSafe };

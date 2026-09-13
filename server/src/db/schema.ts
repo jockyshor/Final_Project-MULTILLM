@@ -1,35 +1,53 @@
-import { pgTable, text, timestamp, integer, uuid } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, integer, vector } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
-// 1. CONVERSATIONS TABLE
+// 1. CONVERSATION THREADS TABLE
 export const conversations = pgTable('conversations', {
   id: uuid('id').defaultRandom().primaryKey(),
-  title: text('title').default('New Conversation').notNull(),
+  title: text('title').notNull().default('New Conversation'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
-// 2. MESSAGES TABLE
+// 2. MESSAGES TABLE WITH TELEMETRY
 export const messages = pgTable('messages', {
   id: uuid('id').defaultRandom().primaryKey(),
   conversationId: uuid('conversation_id')
     .references(() => conversations.id, { onDelete: 'cascade' })
     .notNull(),
-  role: text('role', { enum: ['user', 'assistant', 'system'] }).notNull(),
+  role: text('role').notNull(), // 'user' | 'assistant'
   content: text('content').notNull(),
-  
-  // Telemetry & Observability (populated on assistant turns)
   model: text('model'),
   routingReason: text('routing_reason'),
-  promptTokens: integer('prompt_tokens'),
-  completionTokens: integer('completion_tokens'),
-  totalTokens: integer('total_tokens'),
-  latencyMs: integer('latency_ms'),
-
+  promptTokens: integer('prompt_tokens').default(0),
+  completionTokens: integer('completion_tokens').default(0),
+  totalTokens: integer('total_tokens').default(0),
+  latencyMs: integer('latency_ms').default(0),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
-// 3. RELATIONS (Enables easy joins in Drizzle)
+// 3. UPLOADED DOCUMENTS TABLE (Parent record for RAG)
+export const documents = pgTable('documents', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  filename: text('filename').notNull(),
+  fileType: text('file_type').notNull(), // 'text/plain', 'text/markdown', etc.
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+// 4. DOCUMENT CHUNKS TABLE WITH 768-DIMENSIONAL VECTOR EMBEDDINGS
+export const documentChunks = pgTable('document_chunks', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  documentId: uuid('document_id')
+    .references(() => documents.id, { onDelete: 'cascade' })
+    .notNull(),
+  content: text('content').notNull(),
+  chunkIndex: integer('chunk_index').notNull(),
+  // 768 dimensions matches Google's text-embedding-004
+  embedding: vector('embedding', { dimensions: 768 }).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+// RELATIONS
 export const conversationsRelations = relations(conversations, ({ many }) => ({
   messages: many(messages),
 }));
@@ -38,5 +56,16 @@ export const messagesRelations = relations(messages, ({ one }) => ({
   conversation: one(conversations, {
     fields: [messages.conversationId],
     references: [conversations.id],
+  }),
+}));
+
+export const documentsRelations = relations(documents, ({ many }) => ({
+  chunks: many(documentChunks),
+}));
+
+export const documentChunksRelations = relations(documentChunks, ({ one }) => ({
+  document: one(documents, {
+    fields: [documentChunks.documentId],
+    references: [documents.id],
   }),
 }));
