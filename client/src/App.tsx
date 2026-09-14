@@ -184,7 +184,7 @@ export default function App() {
   };
 
   // Drag-to-resize sidebar handlers
-  const startResizing = (e: React.MouseEvent) => {
+  const startResizing = (_e: React.MouseEvent) => {
     isResizingRef.current = true;
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', stopResizing);
