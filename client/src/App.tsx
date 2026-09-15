@@ -421,7 +421,7 @@ export default function App() {
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400/90 shadow-sm animate-pulse" />
                     <span className="text-[#DEDCD5] font-medium">Groq 20B</span>
                   </span>
-                  <span className="text-[10px] font-mono text-[#85837B]">Quick and Light</span>
+                  <span className="text-[10px] font-mono text-[#85837B]">Quick and Light Triage</span>
                 </div>
 
                 {/* Brain 2: Groq Reasoning */}
