@@ -12,7 +12,6 @@
 
 A production-grade, full-stack autonomous AI platform featuring a **2-Tier Supervisory Meta-Orchestrator** (Groq LPUs and Google Gemini), an autonomous multi-step **ReAct agent loop**, real-time live web grounding with **Tavily AI**, a native **Model Context Protocol (MCP)** background server over `stdio`, and an in-database **Semantic Document RAG engine** powered by **Neon PostgreSQL `pgvector`** with in-memory parsing for `.docx`, `.pdf`, `.md`, and `.txt` files.
 
-Designed with a warm **Claude-inspired Warm Stone (`#181816`)** and **Apple Titanium (`#D97706`)** responsive UI.
 
 ---
 
@@ -23,7 +22,6 @@ Designed with a warm **Claude-inspired Warm Stone (`#181816`)** and **Apple Tita
 - **Live Internet Grounding (Tavily AI)**: Real-time search with an 88% token compression shield, staying safely under provider TPM quotas.
 - **Model Context Protocol (MCP) over `stdio`**: Runs a dedicated background MCP server process exposing live host hardware telemetry (`get_system_metrics`) and clean URL extraction (`fetch_webpage`).
 - **Semantic Document RAG (`pgvector`)**: Ingests Word documents, PDFs, or Markdown files, slices them into overlapping chunks, generates 768-dim vector embeddings, and executes native PostgreSQL cosine similarity search (`<=>`).
-- **Claude Warm Stone + Apple Titanium UI**: High-contrast, responsive interface with a draggable/collapsible sidebar, local storage thread hiding, and real-time status pulses for active model tiers.
 - **Defended Sandbox**: Verified by automated Vitest unit tests to block directory traversal attacks and `.env` secret leaks.
 
 ---
