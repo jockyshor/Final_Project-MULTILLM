@@ -309,7 +309,7 @@ export default function App() {
       )}
 
       {/* =================================================================== */}
-      {/* 1. WARM CLAUDE + APPLE TITANIUM SIDEBAR                             */}
+      {/* 1.  SIDEBAR                             */}
       {/* =================================================================== */}
       {isSidebarOpen && (
         <>
@@ -421,7 +421,7 @@ export default function App() {
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400/90 shadow-sm animate-pulse" />
                     <span className="text-[#DEDCD5] font-medium">Groq 20B</span>
                   </span>
-                  <span className="text-[10px] font-mono text-[#85837B]">Triage &lt;80ms</span>
+                  <span className="text-[10px] font-mono text-[#85837B]">Quick and Light</span>
                 </div>
 
                 {/* Brain 2: Groq Reasoning */}
@@ -437,9 +437,9 @@ export default function App() {
                 <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#181815] border border-[#24231F]">
                   <span className="flex items-center gap-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
-                    <span className="text-[#DEDCD5] font-medium">Gemini 1.5</span>
+                    <span className="text-[#DEDCD5] font-medium">Gemini </span>
                   </span>
-                  <span className="text-[10px] font-mono text-[#85837B]">1M Context</span>
+                  <span className="text-[10px] font-mono text-[#85837B]">Research</span>
                 </div>
               </div>
             </div>

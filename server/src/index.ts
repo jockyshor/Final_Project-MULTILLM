@@ -35,7 +35,7 @@ const gemini = google;
 const MODELS = {
   GROQ_FAST: 'openai/gpt-oss-20b',          // Provider: Groq (Ultra-fast 20B LPU for chat & triage)
   GROQ_REASONING: 'openai/gpt-oss-120b',     // Provider: Groq (Heavyweight 120B for Tools & Reasoning)
-  GEMINI_RESEARCH: 'gemini-1.5-flash',       // Provider: Google (Deep analysis & 1M context)
+  GEMINI_RESEARCH: 'gemini-flash-lite-latest',       // Provider: Google (Deep analysis & 1M context)
 } as const;
 
 // 3. MIDDLEWARE & CORS (With 25MB Body Limit for Base64 PDF/DOCX Ingestion)
@@ -68,7 +68,7 @@ app.get('/api/health', async (req: Request, res: Response) => {
   }
 });
 
-// 5. REST ENDPOINTS FOR HISTORY HYDRATION
+// 5. REST ENDPOINTS FOR HISTORY HYDRATION (With Sleep/Wake Resilience)
 app.get('/api/conversations', async (req: Request, res: Response) => {
   try {
     const list = await db
@@ -140,7 +140,7 @@ app.post('/api/documents/upload', async (req: Request, res: Response) => {
       return;
     }
 
-    // Ingest extracted plain text into our Neon pgvector chunking pipeline
+    // Ingest extracted plain text into Neon pgvector chunking pipeline
     const result = await ingestDocument(filename, extractedText, fileType);
 
     res.json({
@@ -186,7 +186,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       try {
         const { text: titleGen } = await generateText({
           model: groq(MODELS.GROQ_FAST),
-          prompt: `Summarize this user prompt into a clean, concise 2 to 4 word topic title (e.g. "2026 World Cup", "Tokyo Live Weather", "DIY Gel Nails", "React State"). Return ONLY the words, no quotes, no punctuation: "${lastUserMessage}"`,
+          prompt: `Summarize this user prompt into a clean, concise 2 to 4 word topic title (e.g. "React 19 Hooks", "Tokyo Live Weather", "Node Release", "DIY Gel Nails"). Return ONLY the words, no quotes, no punctuation: "${lastUserMessage}"`,
           temperature: 0,
         });
         if (titleGen && titleGen.trim().length > 0) {
@@ -224,7 +224,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       day: 'numeric',
     });
 
-    // 🛡️ CONTEXT DISTILLATION: Keep conversation clean to stay well under Groq's 8,000 TPM limit
+    // 🛡️ CONTEXT DISTILLATION: Slices last 6 turns, truncates oversized historical payloads
     const conversationMessages: any[] = messages
       .slice(-6)
       .map((m: any) => ({
@@ -241,7 +241,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       .join('\n');
 
     // =========================================================================
-    // 🧠 STAGE 1: MULTI-PROVIDER SUPERVISORY ORCHESTRATOR
+    // 🧠 STAGE 1: MULTI-PROVIDER SUPERVISOR (UNIVERSAL KNOWLEDGE BOUNDARY)
     // =========================================================================
     const supervisorStart = Date.now();
 
@@ -253,25 +253,31 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     const supervisorPrompt = `You are the Lead Systems Orchestrator for a multi-provider AI platform.
 Current Reference Date: ${currentDate}. You operate with full temporal awareness.
 
-Analyze the user's latest query in conversational context and select the optimal model tier and tool policy:
+Analyze the user's latest query in conversational context and select the optimal model tier, tool policy, and search query:
 
 AVAILABLE MULTI-PROVIDER TIERS:
-- "REASONING" [Groq: ${MODELS.GROQ_REASONING}]: Heavy 120B model. REQUIRED for all factual verification, real-world sports, champions, history, codebase analysis, uploaded document RAG, and multi-step tool execution. Has high tool-calling fidelity.
+- "REASONING" [Groq: ${MODELS.GROQ_REASONING}]: Heavy 120B model. REQUIRED for all factual verification, real-world events, software versions, leaders, company news, awards, sports, codebase analysis, uploaded document RAG, and multi-step tool execution.
 - "RESEARCH" [Google: ${MODELS.GEMINI_RESEARCH}]: Google Gemini. Best for deep comparative essays, historical analysis, multi-perspective synthesis, or creative writing.
-- "FAST" [Groq: ${MODELS.GROQ_FAST}]: 20B model. Reserved for general knowledge, how-to tutorials, recipes, casual conversation ("hi"), math, summaries, or simple non-tool chat.
+- "FAST" [Groq: ${MODELS.GROQ_FAST}]: 20B model. Reserved ONLY for static conceptual explanations (math, algorithms, philosophy), code generation from first principles, how-to tutorials, recipes, or casual non-tool chat ("hi").
 
 AVAILABLE TOOLS:
 ${dynamicToolCatalog}
 
 DECISION RULES:
-1. For questions asking about real-world facts, sports champions, winners, live weather, uploaded documents, or codebase files: set "modelTier" to "REASONING" and "needsTools" to TRUE.
-2. For how-to guides, tutorials (e.g. gel nails, cooking), creative writing, greetings, or conceptual advice: set "modelTier" to "FAST" and "needsTools" to FALSE.
-3. Choose "RESEARCH" for long-form comparative essays or deep historical analysis.
+DECISION RULES:
+1. For ANY query touching volatile real-world facts, live weather, sports, uploaded documents, or codebase files: set "modelTier" to "REASONING" and "needsTools" to TRUE.
+2. For deep comparative essays, historical analysis, philosophy, or creative writing: set "modelTier" to "RESEARCH" and "needsTools" to FALSE (pure synthesis, no tools needed).
+3. Set "modelTier" to "FAST" and "needsTools" to FALSE for simple tutorials, recipes, or casual chat.
 
 Respond ONLY with raw JSON (no markdown, no backticks):
-{"modelTier": "FAST" | "REASONING" | "RESEARCH", "needsTools": boolean, "reasoning": "1-sentence explanation"}`;
+{"modelTier": "FAST" | "REASONING" | "RESEARCH", "needsTools": boolean, "contextualQuery": "self-contained search phrase", "reasoning": "1-sentence explanation"}`;
 
-    let decision = { modelTier: 'FAST', needsTools: false, reasoning: 'Default to conversational fast mode' };
+    let decision = {
+      modelTier: 'REASONING',
+      needsTools: true,
+      contextualQuery: lastUserMessage,
+      reasoning: 'Default to verified reasoning',
+    };
     let supervisorLatency = 50;
 
     try {
@@ -293,10 +299,14 @@ Respond ONLY with raw JSON (no markdown, no backticks):
         queryLower.includes('weather') ||
         queryLower.includes('code') ||
         queryLower.includes('document') ||
+        queryLower.includes('latest') ||
+        queryLower.includes('current') ||
+        queryLower.includes('version') ||
         queryLower.includes('file');
       decision = {
         modelTier: isFactual ? 'REASONING' : 'FAST',
         needsTools: isFactual,
+        contextualQuery: lastUserMessage,
         reasoning: 'Heuristic fallback applied',
       };
     }
@@ -305,7 +315,9 @@ Respond ONLY with raw JSON (no markdown, no backticks):
     if (decision.modelTier === 'REASONING') {
       selectedModel = groq(MODELS.GROQ_REASONING);
     } else if (decision.modelTier === 'RESEARCH') {
-      selectedModel = gemini(MODELS.GEMINI_RESEARCH);
+      // 🛡️ PROVIDER CHECK: If Google API key is missing or blinks, route to Groq 120B
+      const hasGoogleKey = Boolean(process.env.GOOGLE_GENERATIVE_AI_API_KEY);
+      selectedModel = hasGoogleKey ? gemini(MODELS.GEMINI_RESEARCH) : groq(MODELS.GROQ_REASONING);
     } else {
       selectedModel = groq(MODELS.GROQ_FAST);
     }
@@ -314,16 +326,16 @@ Respond ONLY with raw JSON (no markdown, no backticks):
     const routingReason = `Supervisor [${decision.modelTier}]: ${decision.reasoning} (${supervisorLatency}ms)`;
 
     console.log(
-      `📡 [Supervisor] Thread ${activeConversationId} -> ${selectedModel.modelId} (Provider: ${
-        decision.modelTier === 'RESEARCH' ? 'Google' : 'Groq'
-      } | Tools: ${needsTools ? 'ON' : 'OFF'}) | Reason: "${decision.reasoning}"`
+      `📡 [Supervisor] Thread ${activeConversationId} -> ${selectedModel.modelId} (Tools: ${
+        needsTools ? 'ON' : 'OFF'
+      } | Query: "${decision.contextualQuery}")`
     );
 
     const streamStart = Date.now();
     const executedTools: Array<{ toolName: string; args: any }> = [];
 
     // =========================================================================
-    // 🤖 STAGE 2: HIGH-CEILING AUTONOMOUS ReAct AGENT LOOP
+    // 🤖 STAGE 2: HIGH-CEILING AUTONOMOUS ReAct AGENT LOOP (MODEL-DRIVEN)
     // =========================================================================
     if (needsTools) {
       const MAX_AGENT_STEPS = 5;
@@ -336,16 +348,18 @@ Respond ONLY with raw JSON (no markdown, no backticks):
           currentStep++;
           console.log(`🔄 [ReAct Cycle] Step ${currentStep} of ${MAX_AGENT_STEPS}`);
 
+          // 🛡️ UNIVERSAL EPISTEMIC BOUNDARY: Forces tool verification without JS hacks
           const agentEvaluationPrompt = `You are a versatile Senior AI Specialist and Autonomous Agent.
-Date Reference: ${currentDate}.
+Date Reference: ${currentDate}. You operate with full temporal awareness.
 Available Tools:
 ${dynamicToolCatalog}
 
-Search & Verification Policy:
-- For questions about uploaded files, documents, or CVs, invoke search_documents.
-- When using browse_web, query the live internet for match scores, champions, scorers, and news articles.
-- Formulate concise, specific queries (e.g. "who won the last super bowl result").
-- Conclude as soon as conclusive evidence is gathered.`;
+EPISTEMIC BOUNDARY & VERIFICATION POLICY:
+- TIME-SENSITIVE KNOWLEDGE MANDATE: Your pre-trained neural weights have a fixed training cutoff and are strictly FROZEN. They are considered UNTRUSTED for any real-world factual, temporal, or volatile data.
+- Scope of Mandatory Tool Use: If the query asks about current events, software versions/releases, election results, corporate news, award/tournament outcomes, live weather, codebase files, or uploaded documents: You are STRICTLY PROHIBITED from answering from pre-trained memory. You MUST invoke the appropriate tool to verify ground truth.
+- Target Search Strategy: Use the Supervisor's pre-formulated query ("${decision.contextualQuery || lastUserMessage}") or construct a clean, entity-specific search with relevant years/identifiers.
+- Autonomous Multi-Hop: If initial findings provide partial details, execute a targeted follow-up query autonomously.
+- Conclude only after verified tool evidence has been retrieved.`;
 
           const toolCheck = await generateText({
             model: selectedModel,
@@ -355,29 +369,18 @@ Search & Verification Policy:
             temperature: 0,
           });
 
+          // 🛡️ Type-safe mutable tool list honoring Vercel AI SDK immutability
           let activeToolCalls: any[] = [...(toolCheck.toolCalls || [])];
 
+          // 🛡️ MODEL-DRIVEN AUTONOMY: If model emits 0 tool calls, respect its reasoning and do not inject fake tool calls
           if (activeToolCalls.length === 0) {
-            if (currentStep === 1) {
-              const lower = lastUserMessage.toLowerCase();
-              const defaultTool =
-                lower.includes('document') || lower.includes('file') || lower.includes('cv') || lower.includes('resume')
-                  ? 'search_documents'
-                  : 'browse_web';
-
-              console.log(`⚡ [Agent Failsafe] Enforcing ${defaultTool} lookup for: "${lastUserMessage}"`);
-              activeToolCalls = [
-                {
-                  toolCallId: `call_${Date.now()}`,
-                  toolName: defaultTool,
-                  args: { query: lastUserMessage.replace(/["'“”?]/g, '').trim() },
-                },
-              ];
-            } else {
-              console.log(`✅ [ReAct Cycle] Agent satisfied at Step ${currentStep}. Proceeding to synthesis.`);
-              agentNeedsMoreTools = false;
-              break;
-            }
+            console.log(
+              currentStep === 1
+                ? `ℹ️ [ReAct Cycle] Model determined no external tools were required on Step 1. Proceeding to direct synthesis.`
+                : `✅ [ReAct Cycle] Agent satisfied with gathered evidence at Step ${currentStep}. Proceeding to synthesis.`
+            );
+            agentNeedsMoreTools = false;
+            break;
           }
 
           for (const call of activeToolCalls) {
@@ -404,6 +407,14 @@ Search & Verification Policy:
               toolName = 'browse_web';
             }
 
+            // Contextual Search Query Fallback
+            if (toolName === 'browse_web') {
+              const currentQuery = toolArgs.query || toolArgs.topic || '';
+              if (!currentQuery || currentQuery === lastUserMessage) {
+                toolArgs.query = decision.contextualQuery || lastUserMessage;
+              }
+            }
+
             // Clean Parameter Fallbacks
             if (toolName === 'get_weather' && (!toolArgs.city && !toolArgs.location)) {
               const cityMatch =
@@ -411,14 +422,11 @@ Search & Verification Policy:
                 lastUserMessage.match(/weather\s+(?:in\s+)?([A-Za-z\s]+)/i);
               toolArgs = { city: cityMatch?.[1]?.trim() || lastUserMessage.replace(/weather/i, '').trim() };
             }
-            if (toolName === 'browse_web' && (!toolArgs.query && !toolArgs.topic)) {
-              toolArgs = { query: lastUserMessage.replace(/["'“”?]/g, '').trim() };
-            }
             if (toolName === 'search_documents' && !toolArgs.query) {
               toolArgs = { query: lastUserMessage.replace(/["'“”?]/g, '').trim() };
             }
 
-            // Deduplication Guard
+            // Deduplication Guard: Break immediately if model repeats the exact same query
             const callSignature = `${toolName}:${JSON.stringify(toolArgs)}`;
             if (executedToolSignatures.has(callSignature)) {
               console.log(`⏹️ [ReAct Dedup] Duplicate tool call detected (${toolName}). Breaking loop to prevent thrashing.`);
@@ -439,6 +447,7 @@ Search & Verification Policy:
                 content: `[Executed tool ${toolName} with arguments: ${JSON.stringify(toolArgs)}]`,
               });
 
+              // Minified JSON saves ~40% token overhead
               conversationMessages.push({
                 role: 'user',
                 content: `Tool findings for ${toolName}:\n\`\`\`json\n${JSON.stringify(
@@ -454,6 +463,7 @@ Search & Verification Policy:
         console.warn(`⚠️ [ReAct Recovery] Tool loop issue: ${toolError.message}. Proceeding to synthesis.`);
       }
 
+      // Synthesis closure: explicit instruction so the model does not call tools during streamText
       conversationMessages.push({
         role: 'user',
         content: `All tool findings have been collected. Please deliver your final, comprehensive response now based on the findings above. Do NOT attempt to invoke any more tools. Output clean Markdown only.`,
@@ -461,9 +471,9 @@ Search & Verification Policy:
     }
 
     // =========================================================================
-    // 🚀 STAGE 3: SYNTHESIZE & STREAM GROUNDED ANSWER (Zero-Tool Mode)
+    // 🚀 STAGE 3: SYNTHESIZE & STREAM GROUNDED ANSWER (DUAL PROMPT PATTERN)
     // =========================================================================
-    // 🛡️ DUAL PROMPT PATTERN: If tools were OFF, use a clean conversational prompt with ZERO mentions of tools!
+    // 🛡️ DUAL PROMPT: If tools were OFF, use a pure conversational prompt with ZERO tool mentions!
     const cleanConversationalPrompt = `You are a helpful, versatile Senior AI Assistant.
 Deliver a direct, detailed, and beautifully structured response in clean Markdown.
 Be encouraging, clear, and actionable.`;
@@ -472,11 +482,11 @@ Be encouraging, clear, and actionable.`;
 Date Reference: ${currentDate}.
 Deliver a direct, comprehensive, and factually accurate answer grounded in the real tool findings above.
 
-Chronological & Document Rules:
+Chronological & Grounding Rules:
+- Fact Grounding: Ground all real-world facts, outcomes, figures, versions, and dates strictly in the tool findings above.
 - Document Findings: If search_documents findings are present, summarize the exact facts and cite the source document name.
 - Calendar Arithmetic: Any event date earlier than ${currentDate} has ALREADY occurred in the past.
-- Live Web: Synthesize the final outcome, performers, and winners directly from the live web findings.
-- Cite your sources with clickable Markdown links: [Source Title](URL).
+- Live Web & Documents: Synthesize findings directly and cite sources with clickable Markdown links: [Source Title](URL).
 - Do NOT call any tools. Output clean Markdown only.`;
 
     const activeSystemPrompt = needsTools ? toolGroundedSynthesisPrompt : cleanConversationalPrompt;
@@ -485,7 +495,7 @@ Chronological & Document Rules:
       model: selectedModel,
       system: activeSystemPrompt,
       messages: conversationMessages,
-      maxOutputTokens: 800,
+      maxOutputTokens: 2500,
     });
 
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');

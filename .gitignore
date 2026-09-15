@@ -1,19 +1,38 @@
-# Prerequisites
+# Dependencies
 node_modules/
-.env
-.env.local
+.pnp
+.pnp.js
 
-# Build outputs
+# Production Build Artifacts
 dist/
 build/
+out/
+server/dist/
+client/dist/
 
-# Logs
+# TypeScript Build Info & Maps
+*.tsbuildinfo
+*.js.map
+*.d.ts.map
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
+
+# OS Metadata & Logs
+.DS_Store
+Thumbs.db
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# IDE/OS
+# Test & Coverage Outputs
+coverage/
+.vitest/
+
+# Temp & Editor Files
 .vscode/
-.DS_Store
-
-
+.idea/
+*.swp
+*.swo
