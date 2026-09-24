@@ -10,10 +10,26 @@ out/
 server/dist/
 client/dist/
 
+# Drizzle config generated artifacts
+drizzle.config.js
+drizzle.config.d.ts
+drizzle.config.js.map
+drizzle.config.d.ts.map
+server/drizzle.config.js
+server/drizzle.config.d.ts
+server/drizzle.config.js.map
+server/drizzle.config.d.ts.map
+
 # TypeScript Build Info & Maps
 *.tsbuildinfo
 *.js.map
 *.d.ts.map
+
+# Prevent accidental compiled artifacts in source directories
+server/src/**/*.js
+server/src/**/*.d.ts
+client/src/**/*.js
+client/src/**/*.d.ts
 
 # Environment Variables & Secrets
 .env

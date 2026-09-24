@@ -2,17 +2,17 @@
   "name": "server",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "dist/index.js",
+  "type": "module",
   "scripts": {
-    "dev": "tsx watch --env-file=.env src/index.ts",
-    "build": "tsc",
+"clean": "node -e \"const fs = require('fs'); fs.rmSync('dist', { recursive: true, force: true }); const cleanDir = (dir, isRoot) => { fs.readdirSync(dir, { withFileTypes: true }).forEach(f => { const p = dir + '/' + f.name; if (f.isDirectory() && f.name !== 'node_modules' && f.name !== 'dist') cleanDir(p, false); else if (!isRoot && /\\.(js|d\\.ts|map)$/.test(f.name)) fs.unlinkSync(p); else if (isRoot && /^drizzle\\.config\\.(js|d\\.ts|map)$/.test(f.name)) fs.unlinkSync(p); }); }; if (fs.existsSync('src')) cleanDir('src', false); cleanDir('.', true);\"",    "dev": "tsx watch --env-file=.env src/index.ts",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "test": "vitest run"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "module",
   "dependencies": {
     "@ai-sdk/google": "^4.0.64",
     "@ai-sdk/groq": "^4.0.37",
