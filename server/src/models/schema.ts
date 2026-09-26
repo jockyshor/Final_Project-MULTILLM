@@ -1,7 +1,6 @@
 import { pgTable, text, timestamp, uuid, integer, vector } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
-
 // 1. CONVERSATION THREADS TABLE
 export const conversations = pgTable('conversations', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -31,7 +30,7 @@ export const messages = pgTable('messages', {
 export const documents = pgTable('documents', {
   id: uuid('id').defaultRandom().primaryKey(),
   filename: text('filename').notNull(),
-  fileType: text('file_type').notNull(), // 'text/plain', 'text/markdown', etc.
+  fileType: text('file_type').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
@@ -43,7 +42,6 @@ export const documentChunks = pgTable('document_chunks', {
     .notNull(),
   content: text('content').notNull(),
   chunkIndex: integer('chunk_index').notNull(),
-  // 768 dimensions matches Google's text-embedding-004
   embedding: vector('embedding', { dimensions: 768 }).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
@@ -70,5 +68,3 @@ export const documentChunksRelations = relations(documentChunks, ({ one }) => ({
     references: [documents.id],
   }),
 }));
-
-export * from '../models/schema.js';

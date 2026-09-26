@@ -89,87 +89,587 @@ export const projectTools: Record<string, any> = {
   } as any),
 
   // TOOL 3: TAVILY AI AGENT SEARCH (With Token Compression)
-  browse_web: tool({
-    description: 'Search the live global internet for real-time news, sports match results, scores, champions, and current facts.',
-    parameters: z.object({
-      query: z.string().describe('Search query for live web search (e.g., "who won the last super bowl", "latest news")'),
-      topic: z.string().optional(),
-    }),
-    execute: async (rawArgs: any) => {
-      let args = rawArgs;
-      if (typeof rawArgs === 'string') {
-        try {
-          args = JSON.parse(rawArgs);
-        } catch {
-          args = { query: rawArgs };
-        }
-      }
+  // TOOL 3: TAVILY AI AGENT SEARCH
+// 🕐 Freshness-aware live web search with temporal evidence preservation
+browse_web: tool({
+  description:
+    'Search the live global internet for real-time news, sports results, scores, champions, current facts, current events, software releases, and other time-sensitive information. Automatically applies freshness-aware search behavior for latest/current questions.',
 
-      let query = args?.query || args?.topic || args?.search || args?.q;
-      if (typeof query === 'object' && query !== null) {
-        query = query.query || query.topic || JSON.stringify(query);
-      }
+  parameters: z.object({
+    query: z
+      .string()
+      .describe(
+        'Search query for live web search (e.g., "who won the latest Super Bowl", "latest NFL champion", "current React version")'
+      ),
 
-      if (!query || typeof query !== 'string') {
-        return { error: 'Search query is required.' };
-      }
+    topic: z
+      .string()
+      .optional()
+      .describe(
+        'Optional Tavily topic hint such as "news" or "general".'
+      ),
 
-      const cleanQuery = query.replace(/["'“”]/g, '').trim();
-      const tavilyKey = process.env.TAVILY_API_KEY;
+    time_range: z
+      .enum([
+        'day',
+        'week',
+        'month',
+        'year',
+      ])
+      .optional()
+      .describe(
+        'Optional freshness window for time-sensitive searches.'
+      ),
+  }),
 
-      if (!tavilyKey) {
-        console.error('❌ [Tavily Error] Missing TAVILY_API_KEY in server/.env');
-        return { error: 'TAVILY_API_KEY is missing in server/.env. Please configure it.' };
-      }
+  execute: async (rawArgs: any) => {
+    // ================================================================
+    // 1. NORMALIZE ARGUMENTS
+    // ================================================================
 
-      console.log(`🌐 [Live Web Search] Querying Tavily AI: "${cleanQuery}"`);
+    let args = rawArgs;
 
+    if (typeof rawArgs === 'string') {
       try {
-        const res = await fetch('https://api.tavily.com/search', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            api_key: tavilyKey,
-            query: cleanQuery,
-            search_depth: 'advanced',
-            include_answer: true,
-            max_results: 3,
-          }),
-          signal: AbortSignal.timeout(9000),
-        });
-
-        if (!res.ok) {
-          const errBody = await res.text();
-          throw new Error(`Tavily HTTP ${res.status}: ${errBody}`);
-        }
-
-        const data = await res.json();
-
-        const results = (data.results || []).slice(0, 3).map((r: any) => {
-          let cleanContent = (r.content || '').replace(/\s+/g, ' ').trim();
-          if (cleanContent.length > 350) {
-            cleanContent = cleanContent.slice(0, 350) + '...';
-          }
-          return {
-            title: r.title,
-            snippet: cleanContent,
-            url: r.url,
-          };
-        });
-
-        console.log(`✅ [Tavily AI] Retrieved ${results.length} token-compressed live records.`);
-
-        return {
-          query: cleanQuery,
-          directAnswer: data.answer || null,
-          results,
+        args = JSON.parse(rawArgs);
+      } catch {
+        args = {
+          query: rawArgs,
         };
-      } catch (err: any) {
-        console.error(`[Tavily Search Error]`, err);
-        return { error: `Tavily search failed: ${err.message}` };
       }
-    },
-  } as any),
+    }
+
+    let query =
+      args?.query ||
+      args?.topic ||
+      args?.search ||
+      args?.q;
+
+    if (
+      typeof query === 'object' &&
+      query !== null
+    ) {
+      query =
+        query.query ||
+        query.topic ||
+        JSON.stringify(query);
+    }
+
+    if (
+      !query ||
+      typeof query !== 'string'
+    ) {
+      return {
+        error:
+          'Search query is required.',
+      };
+    }
+
+    const cleanQuery = query
+      .replace(/["'“”]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!cleanQuery) {
+      return {
+        error:
+          'Search query cannot be empty.',
+      };
+    }
+
+    // ================================================================
+    // 2. TAVILY API KEY
+    // ================================================================
+
+    const tavilyKey =
+      process.env.TAVILY_API_KEY;
+
+    if (!tavilyKey) {
+      console.error(
+        '❌ [Tavily Error] Missing TAVILY_API_KEY in server/.env'
+      );
+
+      return {
+        error:
+          'TAVILY_API_KEY is missing in server/.env. Please configure it.',
+      };
+    }
+
+    // ================================================================
+    // 3. DETECT TIME-SENSITIVE QUERIES
+    // ================================================================
+
+    const lowerQuery =
+      cleanQuery.toLowerCase();
+
+    const freshnessPatterns = [
+      /\blatest\b/,
+      /\bcurrent\b/,
+      /\bcurrently\b/,
+      /\bright now\b/,
+      /\btoday\b/,
+      /\bthis week\b/,
+      /\bthis month\b/,
+      /\bthis year\b/,
+      /\brecent\b/,
+      /\bmost recent\b/,
+      /\bnewest\b/,
+      /\bwho won\b/,
+      /\bwinner\b/,
+      /\bchampion\b/,
+      /\bchampions\b/,
+      /\bchampionship\b/,
+      /\bfinal\b/,
+      /\bresults?\b/,
+      /\bscore\b/,
+      /\bstandings?\b/,
+      /\baward\b/,
+      /\bawards\b/,
+      /\belection\b/,
+      /\belected\b/,
+      /\bpresident\b/,
+      /\bprime minister\b/,
+      /\bceo\b/,
+      /\bleader\b/,
+      /\bnews\b/,
+      /\bupdate\b/,
+      /\bupdates\b/,
+      /\brelease\b/,
+      /\breleased\b/,
+      /\bversion\b/,
+      /\bprice\b/,
+      /\bprices\b/,
+      /\bstock\b/,
+      /\bschedule\b/,
+    ];
+
+    const isFreshnessSensitive =
+      freshnessPatterns.some(
+        (pattern) =>
+          pattern.test(lowerQuery)
+      );
+
+    const isSportsQuery =
+      /\bsuper bowl\b/.test(
+        lowerQuery
+      ) ||
+      /\bnfl\b/.test(
+        lowerQuery
+      ) ||
+      /\bnba\b/.test(
+        lowerQuery
+      ) ||
+      /\bmlb\b/.test(
+        lowerQuery
+      ) ||
+      /\bnhl\b/.test(
+        lowerQuery
+      ) ||
+      /\bworld cup\b/.test(
+        lowerQuery
+      ) ||
+      /\bchampion\b/.test(
+        lowerQuery
+      ) ||
+      /\bchampionship\b/.test(
+        lowerQuery
+      ) ||
+      /\btournament\b/.test(
+        lowerQuery
+      ) ||
+      /\bfinal\b/.test(
+        lowerQuery
+      ) ||
+      /\bmatch\b/.test(
+        lowerQuery
+      ) ||
+      /\bgame\b/.test(
+        lowerQuery
+      );
+
+    const isNewsQuery =
+      /\bnews\b/.test(
+        lowerQuery
+      ) ||
+      /\blatest\b/.test(
+        lowerQuery
+      ) ||
+      /\brecent\b/.test(
+        lowerQuery
+      ) ||
+      /\bupdate\b/.test(
+        lowerQuery
+      ) ||
+      /\bupdates\b/.test(
+        lowerQuery
+      ) ||
+      /\bcurrent events\b/.test(
+        lowerQuery
+      );
+
+    // ================================================================
+    // 4. CURRENT DATE
+    // ================================================================
+
+    const now = new Date();
+
+    const currentDate =
+      now.toLocaleDateString(
+        'en-US',
+        {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        }
+      );
+
+    const currentYear =
+      now.getFullYear();
+
+    // ================================================================
+    // 5. FRESHNESS-AWARE QUERY
+    // ================================================================
+
+    let searchQuery =
+      cleanQuery;
+
+    if (
+      isFreshnessSensitive
+    ) {
+      const queryHasYear =
+        /\b20\d{2}\b/.test(
+          searchQuery
+        );
+
+      const queryHasFreshnessMarker =
+        /\b(latest|current|currently|today|recent|newest|most recent)\b/i.test(
+          searchQuery
+        );
+
+      // Do NOT inject an old year.
+      //
+      // If the query already has a specific year, preserve it.
+      //
+      // If it is asking for the current state but doesn't have
+      // a freshness marker, append one.
+      if (
+        !queryHasFreshnessMarker
+      ) {
+        searchQuery +=
+          ` current latest ${currentYear}`;
+      } else if (
+        !queryHasYear
+      ) {
+        // Adding the current year helps search engines surface
+        // current information without replacing the user's query.
+        searchQuery +=
+          ` ${currentYear}`;
+      }
+    }
+
+    // ================================================================
+    // 6. DETERMINE TAVILY SEARCH MODE
+    // ================================================================
+
+    let topic:
+      | 'general'
+      | 'news' = 'general';
+
+    if (
+      isNewsQuery ||
+      isSportsQuery
+    ) {
+      topic = 'news';
+    }
+
+    // ================================================================
+    // 7. DETERMINE FRESHNESS WINDOW
+    // ================================================================
+
+    let timeRange:
+      | 'day'
+      | 'week'
+      | 'month'
+      | 'year'
+      | undefined;
+
+    // Explicit user-provided Tavily setting wins.
+    if (
+      args?.time_range
+    ) {
+      timeRange =
+        args.time_range;
+    } else if (
+      isFreshnessSensitive
+    ) {
+      /*
+       * We intentionally do NOT always use "day".
+       *
+       * A question like:
+       * "Who won the latest Super Bowl?"
+       *
+       * might refer to an event that happened months ago.
+       *
+       * "year" gives Tavily a freshness preference without
+       * accidentally excluding the actual event.
+       */
+      timeRange = 'year';
+    }
+
+    // ================================================================
+    // 8. LOG SEARCH INTENT
+    // ================================================================
+
+    console.log(
+      `🌐 [Live Web Search] Tavily query: "${searchQuery}"`
+    );
+
+    console.log(
+      `🕐 [Freshness Policy] sensitive=${isFreshnessSensitive}, topic=${topic}, time_range=${timeRange || 'none'}`
+    );
+
+    try {
+      // ==============================================================
+      // 9. TAVILY REQUEST
+      // ==============================================================
+
+      const requestBody: Record<
+        string,
+        any
+      > = {
+        api_key:
+          tavilyKey,
+
+        query:
+          searchQuery,
+
+        search_depth:
+          'advanced',
+
+        topic,
+
+        include_answer:
+          true,
+
+        include_raw_content:
+          false,
+
+        max_results:
+          isFreshnessSensitive
+            ? 8
+            : 5,
+      };
+
+      // Tavily accepts time_range as an optional parameter.
+      if (timeRange) {
+        requestBody.time_range =
+          timeRange;
+      }
+
+      const res =
+        await fetch(
+          'https://api.tavily.com/search',
+          {
+            method: 'POST',
+
+            headers: {
+              'Content-Type':
+                'application/json',
+            },
+
+            body:
+              JSON.stringify(
+                requestBody
+              ),
+
+            signal:
+              AbortSignal.timeout(
+                10000
+              ),
+          }
+        );
+
+      // ==============================================================
+      // 10. HANDLE TAVILY HTTP ERRORS
+      // ==============================================================
+
+      if (!res.ok) {
+        const errBody =
+          await res.text();
+
+        throw new Error(
+          `Tavily HTTP ${res.status}: ${errBody}`
+        );
+      }
+
+      const data =
+        await res.json();
+
+      // ==============================================================
+      // 11. PROCESS RESULTS
+      // ==============================================================
+
+      const rawResults =
+        Array.isArray(
+          data.results
+        )
+          ? data.results
+          : [];
+
+      /*
+       * Keep more records internally for the model.
+       *
+       * The old implementation immediately sliced to 3.
+       * That makes it much easier for one stale result to dominate.
+       */
+      const results =
+        rawResults
+          .slice(0, 8)
+          .map(
+            (
+              r: any,
+              index: number
+            ) => {
+              let cleanContent =
+                (
+                  r.content ||
+                  r.raw_content ||
+                  ''
+                )
+                  .replace(
+                    /\s+/g,
+                    ' '
+                  )
+                  .trim();
+
+              /*
+               * 350 characters can be too aggressive for
+               * temporal questions because the date/winner
+               * information may appear later in the snippet.
+               *
+               * Keep 700 characters.
+               */
+              if (
+                cleanContent.length >
+                700
+              ) {
+                cleanContent =
+                  cleanContent.slice(
+                    0,
+                    700
+                  ) + '...';
+              }
+
+              return {
+                rank:
+                  index + 1,
+
+                title:
+                  r.title ||
+                  null,
+
+                url:
+                  r.url ||
+                  null,
+
+                snippet:
+                  cleanContent,
+
+                publishedDate:
+                  r.published_date ||
+                  r.publishedDate ||
+                  null,
+
+                score:
+                  typeof r.score ===
+                  'number'
+                    ? r.score
+                    : null,
+              };
+            }
+          );
+
+      // ================================================================
+      // 12. TEMPORAL METADATA FOR THE AGENT
+      // ================================================================
+
+      const temporalGuidance =
+        isFreshnessSensitive
+          ? {
+              freshnessRequired:
+                true,
+
+              searchDate:
+                currentDate,
+
+              currentYear,
+
+              searchTopic:
+                topic,
+
+              timeRange:
+                timeRange ||
+                null,
+
+              instruction:
+                'For current/latest questions, distinguish article publication date from event date. Do not treat an old historical article as the current answer merely because it is relevant.',
+            }
+          : {
+              freshnessRequired:
+                false,
+
+              searchDate:
+                currentDate,
+
+              currentYear,
+            };
+
+      // ================================================================
+      // 13. TAVILY DIRECT ANSWER
+      // ================================================================
+
+      const directAnswer =
+        data.answer ||
+        null;
+
+      console.log(
+        `✅ [Tavily AI] Retrieved ${results.length} records | Freshness-sensitive: ${isFreshnessSensitive}`
+      );
+
+      // ================================================================
+      // 14. RETURN GROUNDED SEARCH RESULT
+      // ================================================================
+
+      return {
+        query:
+          cleanQuery,
+
+        executedQuery:
+          searchQuery,
+
+        directAnswer,
+
+        temporalContext:
+          temporalGuidance,
+
+        results,
+      };
+    } catch (
+      err: any
+    ) {
+      console.error(
+        `[Tavily Search Error]`,
+        err
+      );
+
+      return {
+        error:
+          `Tavily search failed: ${err.message}`,
+      };
+    }
+  },
+} as any),
+
 
   // TOOL 4: REAL-TIME GLOBAL WEATHER
   get_weather: tool({

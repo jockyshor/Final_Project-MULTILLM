@@ -18,3 +18,5 @@ sql`CREATE EXTENSION IF NOT EXISTS vector;`
   .then(() => console.log('✅ [Neon PostgreSQL] pgvector extension verified.'))
   .catch((err) => console.warn('⚠️ [Neon PostgreSQL] pgvector check notice:', err.message));
   
+
+export * from '../config/db.js';
