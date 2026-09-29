@@ -15,9 +15,9 @@ An enterprise-grade, autonomous multi-model orchestration platform engineered wi
 
 ## 📑 Table of Contents
 
-- [Architectural Overview](#-architectural-overview)
-- [System Architecture & Flow](#-system-architecture--flow)
-- [Key Engineering Pillars](#-key-engineering-pillars)
+- [Architectural Overview](#architectural-overview)
+- [System Architecture & Flow](#system-architecture--flow)
+- [Key Engineering Pillars](#key-engineering-pillars)
   - [1. 2-Tier Supervisory Pattern & Dynamic Model Tiers](#1-2-tier-supervisory-pattern--dynamic-model-tiers)
   - [2. High-Ceiling ReAct Loop & Deduplication Guard](#2-high-ceiling-react-loop--deduplication-guard)
   - [3. Model Context Protocol (MCP) Bridge](#3-model-context-protocol-mcp-bridge)
@@ -25,16 +25,14 @@ An enterprise-grade, autonomous multi-model orchestration platform engineered wi
   - [5. Temporal Freshness & Web Grounding Engine](#5-temporal-freshness--web-grounding-engine)
   - [6. System Prompt Safety & Anti-Leak Policy](#6-system-prompt-safety--anti-leak-policy)
   - [7. Token Economics & Groq TPM Shield](#7-token-economics--groq-tpm-shield)
-- [Repository Structure](#-repository-structure)
-- [REST API Reference & SSE Streaming](#-rest-api-reference--sse-streaming)
-- [Getting Started](#-getting-started)
+- [Repository Structure](#repository-structure)
+- [REST API Reference & SSE Streaming](#rest-api-reference--sse-streaming)
+- [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Environment Configuration](#environment-configuration)
   - [Installation & Execution](#installation--execution)
-- [Production Build & Verification](#-production-build--verification)
-- [License](#-license)
-
----
+- [Production Build & Verification](#production-build--verification)
+- [License](#license)
 
 ## 🏛️ Architectural Overview
 
